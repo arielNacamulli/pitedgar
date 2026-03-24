@@ -1,0 +1,29 @@
+[tool.poetry]
+name = "pitedgar"
+version = "0.1.0"
+description = "Point-in-time SEC EDGAR financial data pipeline"
+authors = ["pitedgar contributors"]
+readme = "README.md"
+packages = [{ include = "pitedgar" }]
+
+[tool.poetry.dependencies]
+python = ">=3.11"
+edgartools = ">=5.0"
+pandas = ">=2.0"
+pyarrow = "*"
+requests = "*"
+tqdm = "*"
+loguru = "*"
+pydantic = ">=2.0"
+click = "*"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "*"
+pytest-mock = "*"
+
+[tool.poetry.scripts]
+pitedgar = "pitedgar.cli:cli"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
