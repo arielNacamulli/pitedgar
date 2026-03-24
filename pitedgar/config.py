@@ -24,7 +24,7 @@ DEFAULT_CONCEPTS = [
 ]
 
 DEFAULT_FORMS = ["10-K", "10-Q"]
-BULK_ZIP_URL = "https://data.sec.gov/api/xbrl/companyfacts.zip"
+BULK_ZIP_URL = "https://www.sec.gov/Archives/edgar/daily-index/xbrl/companyfacts.zip"
 
 
 class PitEdgarConfig(BaseModel):
