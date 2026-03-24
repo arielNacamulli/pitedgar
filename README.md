@@ -1,5 +1,10 @@
 # pitedgar
 
+[![CI](https://github.com/arielNacamulli/pitedgar/actions/workflows/ci.yml/badge.svg)](https://github.com/arielNacamulli/pitedgar/actions/workflows/ci.yml)
+[![PyPI version](https://img.shields.io/pypi/v/pitedgar.svg)](https://pypi.org/project/pitedgar/)
+[![Python versions](https://img.shields.io/pypi/pyversions/pitedgar.svg)](https://pypi.org/project/pitedgar/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Point-in-time SEC EDGAR financial data pipeline.
 
 Downloads SEC EDGAR `companyfacts.zip`, parses XBRL JSON facts into a local
@@ -89,3 +94,21 @@ pitedgar query --ticker AAPL --concept us-gaap:Revenues --as-of 2023-06-30
 See `pitedgar.config.DEFAULT_CONCEPTS` for the full list, which includes
 revenues, net income, assets, liabilities, equity, EPS, cash, debt, operating
 cash flow, capex, and R&D expense.
+
+---
+
+## Examples
+
+- [`examples/fcf_sp500.py`](examples/fcf_sp500.py) — S&P 500 free cash flow benchmark: fetches constituents, builds the parquet, and queries FCF cross-sections across 20 quarters. Useful as an end-to-end performance reference.
+
+---
+
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions, coding conventions, and the PR process.
+
+---
+
+## License
+
+[MIT](LICENSE)

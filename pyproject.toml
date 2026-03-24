@@ -2,8 +2,25 @@
 name = "pitedgar"
 version = "0.1.0"
 description = "Point-in-time SEC EDGAR financial data pipeline"
-authors = ["pitedgar contributors"]
+authors = ["Ariel Nacamulli"]
+license = "MIT"
 readme = "README.md"
+homepage = "https://github.com/arielNacamulli/pitedgar"
+repository = "https://github.com/arielNacamulli/pitedgar"
+documentation = "https://github.com/arielNacamulli/pitedgar#readme"
+keywords = ["SEC", "EDGAR", "financial-data", "point-in-time", "XBRL", "backtesting"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial",
+    "Topic :: Scientific/Engineering",
+    "Typing :: Typed",
+]
 packages = [{ include = "pitedgar" }]
 
 [tool.poetry.dependencies]
