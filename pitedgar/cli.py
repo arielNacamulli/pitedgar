@@ -24,12 +24,14 @@ def cli() -> None:
               help='SEC identity string, e.g. "Name name@email.com".')
 @click.option("--data-dir", default="./data", show_default=True,
               help="Directory where outputs are saved.")
-def cmd_map(tickers_file: str, identity: str, data_dir: str) -> None:
+@click.option("--force", is_flag=True, default=False,
+              help="Re-resolve all tickers, ignoring the existing cache.")
+def cmd_map(tickers_file: str, identity: str, data_dir: str, force: bool) -> None:
     """Resolve tickers to CIK numbers and save the mapping."""
     tickers = Path(tickers_file).read_text().splitlines()
     tickers = [t.strip().upper() for t in tickers if t.strip()]
     config = PitEdgarConfig(edgar_identity=identity, data_dir=Path(data_dir))
-    cik_map = build_cik_map(tickers, config)
+    cik_map = build_cik_map(tickers, config, force=force)
     click.echo(f"Mapped {len(cik_map)} tickers → {config.data_dir / 'ticker_cik_map.parquet'}")
 
 
