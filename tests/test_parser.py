@@ -89,3 +89,57 @@ def test_parse_all(tmp_path):
     assert "ticker" in master.columns
     assert set(master["ticker"]) == {"AAPL"}
     assert (tmp_path / "pit_financials.parquet").exists()
+
+
+def test_parse_all_skips_when_parquet_exists(tmp_path):
+    """parse_all must return cached parquet without running the parse loop."""
+    cik = "0000320193"
+    facts_dir = tmp_path / "companyfacts"
+    facts_dir.mkdir()
+    (facts_dir / f"CIK{cik}.json").write_text(json.dumps(SAMPLE_FACTS), encoding="utf-8")
+
+    config = PitEdgarConfig(
+        edgar_identity="Test test@example.com",
+        data_dir=tmp_path,
+        facts_dir=facts_dir,
+    )
+    cik_map = pd.DataFrame({"cik": [cik]}, index=pd.Index(["AAPL"], name="ticker"))
+
+    # First call: produces the parquet.
+    first = parse_all(config, cik_map)
+
+    # Second call (force=False): must return the cached file, not re-parse.
+    # We verify by patching parse_company — it must NOT be called.
+    from unittest.mock import patch
+
+    with patch("pitedgar.parser.parse_company") as mock_pc:
+        second = parse_all(config, cik_map, force=False)
+        mock_pc.assert_not_called()
+
+    assert list(second.columns) == list(first.columns)
+    assert len(second) == len(first)
+
+
+def test_parse_all_force_reparses(tmp_path):
+    """force=True must re-run the parse loop even if parquet exists."""
+    cik = "0000320193"
+    facts_dir = tmp_path / "companyfacts"
+    facts_dir.mkdir()
+    (facts_dir / f"CIK{cik}.json").write_text(json.dumps(SAMPLE_FACTS), encoding="utf-8")
+
+    config = PitEdgarConfig(
+        edgar_identity="Test test@example.com",
+        data_dir=tmp_path,
+        facts_dir=facts_dir,
+    )
+    cik_map = pd.DataFrame({"cik": [cik]}, index=pd.Index(["AAPL"], name="ticker"))
+
+    # Create the parquet first.
+    parse_all(config, cik_map)
+
+    from unittest.mock import patch, call
+    import pitedgar.parser as parser_mod
+
+    with patch.object(parser_mod, "parse_company", wraps=parser_mod.parse_company) as mock_pc:
+        parse_all(config, cik_map, force=True)
+        assert mock_pc.call_count >= 1

@@ -116,17 +116,24 @@ def parse_company(
     return df
 
 
-def parse_all(config: PitEdgarConfig, cik_map: pd.DataFrame) -> pd.DataFrame:
+def parse_all(config: PitEdgarConfig, cik_map: pd.DataFrame, force: bool = False) -> pd.DataFrame:
     """Parse all companies in cik_map into a single PIT master parquet.
 
     Args:
         config:  pipeline configuration.
         cik_map: DataFrame indexed by ticker with a 'cik' column.
+        force:   re-parse even if pit_financials.parquet already exists.
 
     Returns:
         Master DataFrame with an additional 'ticker' column.
     """
     config.ensure_dirs()
+    out_path = config.data_dir / "pit_financials.parquet"
+
+    if not force and out_path.exists():
+        logger.info(f"Parquet already exists at {out_path}, skipping parse (use force=True to override).")
+        return pd.read_parquet(out_path)
+
     all_frames: list[pd.DataFrame] = []
 
     for ticker, row in tqdm(cik_map.iterrows(), total=len(cik_map), desc="Parsing"):
@@ -148,7 +155,6 @@ def parse_all(config: PitEdgarConfig, cik_map: pd.DataFrame) -> pd.DataFrame:
 
     master = pd.concat(all_frames, ignore_index=True)
 
-    out_path = config.data_dir / "pit_financials.parquet"
     master.to_parquet(out_path, index=False)
     logger.info(f"Master parquet saved: {out_path} ({len(master):,} rows)")
     return master

@@ -15,7 +15,7 @@ def download_bulk(config: PitEdgarConfig, force: bool = False) -> Path:
 
     Args:
         config: pipeline configuration.
-        force: re-extract even if facts_dir already exists.
+        force: re-download and re-extract even if files already exist.
 
     Returns:
         Path to the extracted facts directory.
@@ -25,25 +25,27 @@ def download_bulk(config: PitEdgarConfig, force: bool = False) -> Path:
 
     headers = {"User-Agent": config.edgar_identity}
 
-    logger.info(f"Downloading {config.zip_url} …")
-    with requests.get(config.zip_url, stream=True, headers=headers, timeout=120) as resp:
-        resp.raise_for_status()
-        total = int(resp.headers.get("Content-Length", 0)) or None
-        with (
-            open(zip_path, "wb") as fh,
-            tqdm(
-                total=total,
-                unit="B",
-                unit_scale=True,
-                unit_divisor=1024,
-                desc="companyfacts.zip",
-            ) as bar,
-        ):
-            for chunk in resp.iter_content(chunk_size=1 << 20):
-                fh.write(chunk)
-                bar.update(len(chunk))
-
-    logger.info(f"ZIP saved: {zip_path}")
+    if not force and zip_path.exists():
+        logger.info(f"ZIP already exists at {zip_path}, skipping download (use force=True to override).")
+    else:
+        logger.info(f"Downloading {config.zip_url} …")
+        with requests.get(config.zip_url, stream=True, headers=headers, timeout=120) as resp:
+            resp.raise_for_status()
+            total = int(resp.headers.get("Content-Length", 0)) or None
+            with (
+                open(zip_path, "wb") as fh,
+                tqdm(
+                    total=total,
+                    unit="B",
+                    unit_scale=True,
+                    unit_divisor=1024,
+                    desc="companyfacts.zip",
+                ) as bar,
+            ):
+                for chunk in resp.iter_content(chunk_size=1 << 20):
+                    fh.write(chunk)
+                    bar.update(len(chunk))
+        logger.info(f"ZIP saved: {zip_path}")
 
     facts_dir = config.facts_dir
     if force or not facts_dir.exists() or not any(facts_dir.iterdir()):

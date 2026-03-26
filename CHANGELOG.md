@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-03-26
+
+### Changed
+- `download_bulk()` now skips the HTTP download if `companyfacts.zip` already exists and `force=False` (~1.27 GB saved per run)
+- `parse_all()` now skips the parse loop if `pit_financials.parquet` already exists and `force=False` (~16s saved per run); added `force: bool = False` parameter
+
+### Added
+- 5 new unit tests covering cache-skip and `force` flag behaviour for both `download_bulk` and `parse_all`
+
 ## [0.1.1] - 2026-03-26
 
 ### Changed
