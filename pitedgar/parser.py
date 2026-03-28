@@ -7,7 +7,7 @@ import pandas as pd
 from loguru import logger
 from tqdm import tqdm
 
-from pitedgar.config import PitEdgarConfig
+from pitedgar.config import PitEdgarConfig, CONCEPT_ALIASES
 
 # Units to attempt per concept, in priority order.
 # EPS and share concepts use "shares"; everything else USD.
@@ -55,21 +55,30 @@ def parse_company(
 
     rows: list[dict] = []
 
+    # Build reverse alias map: canonical -> [alias, ...]
+    alias_lookup: dict[str, list[str]] = {c: [] for c in concepts}
+    for alias, canonical in CONCEPT_ALIASES.items():
+        if canonical in alias_lookup:
+            alias_lookup[canonical].append(alias)
+
     for concept_full in concepts:
-        # concept_full is like "us-gaap:Revenues"
-        parts = concept_full.split(":", 1)
-        concept_short = parts[1] if len(parts) == 2 else parts[0]
-
-        concept_data = usgaap.get(concept_short)
-        if concept_data is None:
-            continue
-
-        units_dict: dict = concept_data.get("units", {})
+        # Try the canonical concept first, then any aliases (e.g. post-ASC 606 revenue tag).
+        # Store all rows under the canonical name regardless of which tag matched.
+        candidates = [concept_full] + alias_lookup.get(concept_full, [])
         unit_entries: list[dict] | None = None
+        canonical_short = concept_full.split(":", 1)[-1]
 
-        for unit_key in _preferred_units(concept_short):
-            if unit_key in units_dict:
-                unit_entries = units_dict[unit_key]
+        for candidate_full in candidates:
+            concept_short = candidate_full.split(":", 1)[-1]
+            concept_data = usgaap.get(concept_short)
+            if concept_data is None:
+                continue
+            units_dict: dict = concept_data.get("units", {})
+            for unit_key in _preferred_units(canonical_short):
+                if unit_key in units_dict:
+                    unit_entries = units_dict[unit_key]
+                    break
+            if unit_entries:
                 break
 
         if not unit_entries:
@@ -79,6 +88,7 @@ def parse_company(
             form = entry.get("form", "")
             if form not in forms:
                 continue
+            start = entry.get("start")
             end = entry.get("end")
             filed = entry.get("filed")
             val = entry.get("val")
@@ -89,6 +99,7 @@ def parse_company(
                 {
                     "cik": cik_padded,
                     "concept": concept_full,
+                    "start": start,
                     "end": end,
                     "filed": filed,
                     "val": float(val),
@@ -102,13 +113,28 @@ def parse_company(
 
     df = pd.DataFrame(rows)
     df["end"] = pd.to_datetime(df["end"], errors="coerce")
+    df["start"] = pd.to_datetime(df["start"], errors="coerce")
     df["filed"] = pd.to_datetime(df["filed"], errors="coerce")
     df = df.dropna(subset=["end", "filed"])
 
-    # PIT deduplication: for each (concept, end), keep the most recently filed record.
+    # Scale detection: some filers report USD values in thousands instead of dollars.
+    # If the maximum absolute USD value across all concepts is < $1M, the company is
+    # almost certainly mis-scaled — correct silently by multiplying by 1000.
+    usd_mask = ~df["concept"].str.split(":").str[-1].isin(_SHARE_CONCEPTS)
+    if usd_mask.any() and df.loc[usd_mask, "val"].abs().max() < 1_000_000:
+        df.loc[usd_mask, "val"] *= 1000
+
+    # Calcola la durata in giorni; -1 se start mancante (entry istantanee, es. balance sheet)
+    df["duration_days"] = (df["end"] - df["start"]).dt.days.where(df["start"].notna(), -1)
+
+    # Within-filing dedup: a single filing can contain both a discrete quarter and a YTD
+    # cumulative entry for the same (concept, end). Prefer the discrete quarter (60-100 days).
+    # We dedup on (concept, end, filed) so restatements filed on different dates are preserved.
+    df["_is_quarterly"] = ((df["duration_days"] >= 60) & (df["duration_days"] <= 100)).astype(int)
     df = (
-        df.sort_values("filed")
-        .drop_duplicates(subset=["concept", "end"], keep="last")
+        df.sort_values(["filed", "_is_quarterly"])
+        .drop_duplicates(subset=["concept", "end", "filed"], keep="last")
+        .drop(columns=["_is_quarterly"])
         .sort_values("filed")
         .reset_index(drop=True)
     )

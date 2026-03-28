@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "pitedgar"
-version = "0.1.2"
+version = "0.2.0"
 description = "Point-in-time SEC EDGAR financial data pipeline"
 authors = ["Ariel Nacamulli"]
 license = "MIT"
@@ -37,6 +37,14 @@ click = "*"
 [tool.poetry.group.dev.dependencies]
 pytest = "*"
 pytest-mock = "*"
+pytest-cov = "*"
+
+[tool.coverage.run]
+source = ["pitedgar"]
+omit = ["pitedgar/cli.py"]
+
+[tool.coverage.report]
+show_missing = true
 
 [tool.poetry.scripts]
 pitedgar = "pitedgar.cli:cli"

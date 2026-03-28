@@ -5,7 +5,6 @@ from pydantic import BaseModel, model_validator
 
 DEFAULT_CONCEPTS = [
     "us-gaap:Revenues",
-    "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax",
     "us-gaap:NetIncomeLoss",
     "us-gaap:Assets",
     "us-gaap:Liabilities",
@@ -17,11 +16,17 @@ DEFAULT_CONCEPTS = [
     "us-gaap:CommonStockSharesOutstanding",
     "us-gaap:CashAndCashEquivalentsAtCarryingValue",
     "us-gaap:LongTermDebt",
-    "us-gaap:OperatingCashFlow",
     "us-gaap:NetCashProvidedByUsedInOperatingActivities",
-    "us-gaap:CapitalExpendituresIncurredButNotYetPaid",
+    "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment",
     "us-gaap:ResearchAndDevelopmentExpense",
 ]
+
+# Maps deprecated/variant XBRL tags to their canonical concept in DEFAULT_CONCEPTS.
+# Applied at parse time so the parquet always uses canonical names.
+CONCEPT_ALIASES: dict[str, str] = {
+    "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax": "us-gaap:Revenues",
+    "us-gaap:OperatingCashFlow": "us-gaap:NetCashProvidedByUsedInOperatingActivities",
+}
 
 DEFAULT_FORMS = ["10-K", "10-Q"]
 BULK_ZIP_URL = "https://www.sec.gov/Archives/edgar/daily-index/xbrl/companyfacts.zip"

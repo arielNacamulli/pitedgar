@@ -1,17 +1,53 @@
-"""pitedgar — Point-in-time SEC EDGAR financial data pipeline."""
+"""pitedgar — Point-in-time SEC EDGAR financial data pipeline.
 
-__version__ = "0.1.0"
+Typical usage::
 
-from pitedgar.config import PitEdgarConfig
+    from pitedgar import PitQuery, PitEdgarConfig, DEFAULT_CONCEPTS
+
+    q = PitQuery("data/pit_financials.parquet")
+
+    # Balance sheet snapshot for S&P 500 across 20 quarterly rebalance dates
+    assets = q.cross_section("us-gaap:Assets", rebalance_dates)
+
+    # TTM revenue for S&P 500 across the same dates
+    revenue = q.ttm_cross_section("us-gaap:Revenues", rebalance_dates)
+
+    # Ad-hoc PIT lookup
+    row = q.as_of("AAPL", "us-gaap:Revenues", "2024-01-01")
+
+Pipeline stages (run once to build the parquet)::
+
+    from pitedgar import PitEdgarConfig, build_cik_map, download_bulk, parse_all
+
+    config = PitEdgarConfig(edgar_identity="Your Name your@email.com", data_dir="data")
+    cik_map = build_cik_map(tickers, config)
+    download_bulk(config)
+    parse_all(config, cik_map)
+"""
+
+__version__ = "0.2.0"
+
+from pitedgar.config import (
+    PitEdgarConfig,
+    DEFAULT_CONCEPTS,
+    DEFAULT_FORMS,
+    CONCEPT_ALIASES,
+)
 from pitedgar.mapping import build_cik_map
 from pitedgar.downloader import download_bulk
 from pitedgar.parser import parse_all
 from pitedgar.query import PitQuery
 
 __all__ = [
+    # Query API
+    "PitQuery",
+    # Pipeline stages
     "PitEdgarConfig",
     "build_cik_map",
     "download_bulk",
     "parse_all",
-    "PitQuery",
+    # Constants (inspect or override via PitEdgarConfig)
+    "DEFAULT_CONCEPTS",
+    "DEFAULT_FORMS",
+    "CONCEPT_ALIASES",
 ]

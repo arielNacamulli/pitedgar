@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-03-28
+
+### Fixed
+- **Restatement history preserved**: parser no longer deduplicates across different filing dates; the query layer now enforces PIT dedup at query time (`filed <= as_of_date`, then latest-filed per period end). A Q1 restatement filed after Q2 now correctly supersedes the original Q1 value from its restatement date onward.
+- **Wrong CapEx concept**: replaced `CapitalExpendituresIncurredButNotYetPaid` (accrued-but-unpaid capex) with `PaymentsToAcquirePropertyPlantAndEquipment` (actual cash capex) in `DEFAULT_CONCEPTS`.
+- **Duplicate OCF concept**: removed `OperatingCashFlow` from `DEFAULT_CONCEPTS`; `NetCashProvidedByUsedInOperatingActivities` is the canonical tag.
+- **`as_of()` returns latest period end, not latest filing**: after PIT dedup by `(ticker, end)`, the method now picks `idxmax("end")` per ticker so a late restatement of an old period never shadows the most recent quarter.
+- **Quarterly dedup window widened**: lower bound changed from 70 to 60 days to correctly identify discrete quarters in 52/53-week fiscal calendars.
+- **USD scale correction**: companies that report USD values in thousands (max absolute value < $1M) are silently corrected by 1000× at parse time. Share/EPS concepts are unaffected.
+
+### Added
+- **`CONCEPT_ALIASES`**: maps deprecated/variant XBRL tags to canonical names (e.g. `RevenueFromContractWithCustomerExcludingAssessedTax` → `Revenues`). Applied at parse time so the parquet always uses canonical names; post-ASC 606 filers are now captured under `us-gaap:Revenues` automatically.
+- **`PitQuery.ttm()`**: point-in-time trailing-twelve-month series for a single ticker/concept from 10-Q filings. Uses a running-state dict (O(n log n)) instead of a per-date DataFrame scan.
+- **`PitQuery.ttm_cross_section()`**: bulk TTM for a full universe across multiple rebalance dates. Optimized with a single grouped `_ttm_events` pass + one vectorized `merge_asof(by="ticker")` — no per-date or per-ticker Python loops.
+- **`PitQuery.cross_section()` multi-date support**: now accepts a list or `DatetimeIndex` of dates (same interface as `ttm_cross_section`). Uses `_snapshot_events` step-functions + single `merge_asof(by="ticker")` for S&P 500 / Russell 3000 scale.
+- **Clean public API**: `DEFAULT_CONCEPTS`, `DEFAULT_FORMS`, and `CONCEPT_ALIASES` are now exported from the top-level `pitedgar` package alongside `PitQuery`, `PitEdgarConfig`, and the pipeline functions.
+- **`max_staleness_days` default reduced**: 180 → 100 days, matching a quarterly filing cycle.
+- 15 new tests covering restatement PIT correctness, concept aliasing, scale correction, `ttm()`, `ttm_cross_section()`, and multi-date `cross_section()`.
+
 ## [0.1.2] - 2026-03-26
 
 ### Changed
