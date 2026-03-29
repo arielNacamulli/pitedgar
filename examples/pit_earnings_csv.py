@@ -31,7 +31,7 @@ raw = pq.ttm_cross_section(
     concept=CONCEPT,
     as_of_dates=business_days,
     tickers=TICKERS,
-    max_staleness_days=100,
+    max_staleness_days=120,
 )
 
 result = raw.pivot(index="as_of_date", columns="ticker", values="ttm_val")[TICKERS]
