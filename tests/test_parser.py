@@ -220,6 +220,41 @@ def test_parse_company_restatements_preserve_filed_dates(tmp_path):
     assert vals == {1_000_000_000.0, 1_050_000_000.0}
 
 
+def test_parse_company_drops_unchanged_comparative_filings(tmp_path):
+    """Later re-filings of the same unchanged value (comparative periods in
+    subsequent 10-Ks) must be dropped to preserve PIT accuracy."""
+    facts = {
+        "facts": {"us-gaap": {"Revenues": {"units": {"USD": [
+            # Original FY2022 10-K (filed Feb 2023)
+            {"start": "2022-01-01", "end": "2022-12-31", "filed": "2023-02-01", "val": 1_000_000_000, "form": "10-K", "accn": "P1"},
+            # Same period/value re-filed 2 years later as comparative in FY2024 10-K
+            {"start": "2022-01-01", "end": "2022-12-31", "filed": "2025-02-01", "val": 1_000_000_000, "form": "10-K", "accn": "P2"},
+        ]}}}}
+    }
+    cik = "0000000007"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+    df = parse_company(cik, ["us-gaap:Revenues"], tmp_path, ["10-K"])
+    # Only the earliest filing must survive — the later re-filing adds no new information
+    assert len(df) == 1
+    assert df.iloc[0]["filed"] == pd.Timestamp("2023-02-01")
+    assert df.iloc[0]["accn"] == "P1"
+
+
+def test_parse_company_restated_value_preserved_after_dedup(tmp_path):
+    """A genuine restatement (changed value) must be kept even after cross-filing dedup."""
+    facts = {
+        "facts": {"us-gaap": {"Revenues": {"units": {"USD": [
+            {"start": "2022-01-01", "end": "2022-12-31", "filed": "2023-02-01", "val": 1_000_000_000, "form": "10-K", "accn": "R1"},
+            {"start": "2022-01-01", "end": "2022-12-31", "filed": "2023-04-01", "val": 1_050_000_000, "form": "10-K", "accn": "R2"},
+        ]}}}}
+    }
+    cik = "0000000008"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+    df = parse_company(cik, ["us-gaap:Revenues"], tmp_path, ["10-K"])
+    assert len(df) == 2
+    assert set(df["accn"]) == {"R1", "R2"}
+
+
 def test_parse_company_missing_file(tmp_path):
     df = parse_company("9999999999", ["us-gaap:Revenues"], tmp_path, ["10-K"])
     assert df.empty

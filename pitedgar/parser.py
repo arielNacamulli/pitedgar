@@ -135,9 +135,17 @@ def parse_company(
         df.sort_values(["filed", "_is_quarterly"])
         .drop_duplicates(subset=["concept", "end", "filed"], keep="last")
         .drop(columns=["_is_quarterly"])
-        .sort_values("filed")
-        .reset_index(drop=True)
     )
+
+    # Cross-filing dedup: for each (concept, end), keep only the EARLIEST filing of
+    # each distinct value. Later re-filings of the same unchanged value — e.g. a prior
+    # period appearing as comparative data in a subsequent 10-K — would inflate the
+    # PIT "known date" by years and must be dropped. Genuine restatements (value changes
+    # between filings) are preserved as new rows so the query layer can track them.
+    df = df.sort_values(["concept", "end", "filed"])
+    prev_val = df.groupby(["concept", "end"], sort=False)["val"].shift(1)
+    keep = prev_val.isna() | (df["val"] != prev_val)
+    df = df[keep].sort_values("filed").reset_index(drop=True)
 
     return df
 

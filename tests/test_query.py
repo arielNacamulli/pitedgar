@@ -300,6 +300,132 @@ def test_cross_section_missing_ticker(parquet_path):
 # history dedup
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Q4-from-10-K derivation
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def dec_fy_parquet_path(tmp_path):
+    """December-FY company: Q1/Q2/Q3 as 10-Qs, Q4 only in 10-K annual.
+
+    Annual = Q1 + Q2 + Q3 + Q4 = 100 + 200 + 300 + 400 = 1000.
+    The 10-K is filed 2026-02-05.  The last 10-Q (Q3) was filed 2025-11-10,
+    which is ~135 days before a March-2026 query — exceeding the default
+    max_staleness_days=100.  Without 10-K fallback these tickers go to NaN.
+    """
+    records = [
+        # Q1 2025
+        {"ticker": "TSLA", "concept": CONCEPT, "end": "2025-03-31", "filed": "2025-05-05", "val": 100.0, "form": "10-Q", "accn": "K1"},
+        # Q2 2025
+        {"ticker": "TSLA", "concept": CONCEPT, "end": "2025-06-30", "filed": "2025-08-05", "val": 200.0, "form": "10-Q", "accn": "K2"},
+        # Q3 2025 — last 10-Q, filed ~135 days before 2026-03-28
+        {"ticker": "TSLA", "concept": CONCEPT, "end": "2025-09-30", "filed": "2025-11-10", "val": 300.0, "form": "10-Q", "accn": "K3"},
+        # FY2025 10-K — annual = Q1+Q2+Q3+Q4 = 1000; filed 2026-02-05 (~51 days ago)
+        {"ticker": "TSLA", "concept": CONCEPT, "end": "2025-12-31", "filed": "2026-02-05", "val": 1000.0, "form": "10-K", "accn": "K4"},
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    return path
+
+
+def test_ttm_derives_q4_from_10k(dec_fy_parquet_path):
+    """ttm() must use Annual − Q1 − Q2 − Q3 = 400 as Q4, giving TTM = 1000."""
+    q = PitQuery(dec_fy_parquet_path)
+    result = q.ttm("TSLA", CONCEPT)
+    last = result.iloc[-1]
+    assert last["ttm_val"] == pytest.approx(1000.0)
+    assert last["n_periods"] == 4
+    # The event is emitted at the 10-K filing date, not the last 10-Q date
+    assert last["filed"] == pd.Timestamp("2026-02-05")
+
+
+def test_ttm_cross_section_dec_fy_not_stale(dec_fy_parquet_path):
+    """ttm_cross_section must not nullify December-FY companies whose 10-K is recent."""
+    q = PitQuery(dec_fy_parquet_path)
+    result = q.ttm_cross_section(CONCEPT, "2026-03-28", max_staleness_days=100)
+    row = result.iloc[0]
+    # 2026-03-28 minus 10-K filed 2026-02-05 = 51 days < 100 → not stale
+    assert row["ttm_val"] == pytest.approx(1000.0)
+    assert row["n_periods"] == 4
+
+
+def test_ttm_cross_section_before_10k_filed_still_stale(dec_fy_parquet_path):
+    """Before the 10-K is filed, the last 10-Q is too old → TTM is NaN."""
+    q = PitQuery(dec_fy_parquet_path)
+    # Query on 2026-01-01: 10-K not yet filed (2026-02-05); last 10-Q filed 2025-11-10
+    # staleness = ~52 days at 100-day threshold → not stale yet; but test at shorter threshold
+    result = q.ttm_cross_section(CONCEPT, "2026-01-20", max_staleness_days=60)
+    row = result.iloc[0]
+    # Last 10-Q was 2025-11-10 (~71 days before 2026-01-20) → stale at 60-day threshold
+    assert pd.isna(row["ttm_val"])
+
+
+def test_ttm_q4_not_injected_when_fewer_than_3_quarters(tmp_path):
+    """If only Q1+Q2 exist for a fiscal year, Q4 is NOT synthesised (would absorb Q3 too)."""
+    records = [
+        {"ticker": "TSLA", "concept": CONCEPT, "end": "2025-03-31", "filed": "2025-05-05", "val": 100.0, "form": "10-Q", "accn": "K1"},
+        {"ticker": "TSLA", "concept": CONCEPT, "end": "2025-06-30", "filed": "2025-08-05", "val": 200.0, "form": "10-Q", "accn": "K2"},
+        # No Q3 10-Q
+        {"ticker": "TSLA", "concept": CONCEPT, "end": "2025-12-31", "filed": "2026-02-05", "val": 1000.0, "form": "10-K", "accn": "K4"},
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    q = PitQuery(path)
+    # No synthetic Q4 → only 2 quarters available → min_periods=4 not met
+    result = q.ttm("TSLA", CONCEPT, min_periods=4)
+    assert result.empty
+
+
+def test_ttm_q4_pit_no_lookahead_before_10k(dec_fy_parquet_path):
+    """Before the 10-K is filed, the synthetic Q4 must not exist (PIT correctness)."""
+    q = PitQuery(dec_fy_parquet_path)
+    # end_date before 10-K filing → synthetic Q4 not yet known → min_periods=4 unmet
+    result = q.ttm("TSLA", CONCEPT, end_date="2026-01-31", min_periods=4)
+    assert result.empty
+
+
+def test_ttm_uses_quarterly_data_from_10k_filings(tmp_path):
+    """Discrete quarterly values inside 10-K filings (duration_days≈90, form='10-K')
+    must be included in TTM — this is the JNJ pattern where EDGAR only has quarterly
+    NetIncomeLoss as comparative data inside annual 10-K filings."""
+    records = [
+        # All 4 quarters appear as form='10-K' with quarterly duration
+        {"ticker": "JNJ", "concept": CONCEPT, "end": "2022-03-31", "filed": "2023-02-15", "val": 100.0, "form": "10-K", "accn": "J1", "duration_days": 90},
+        {"ticker": "JNJ", "concept": CONCEPT, "end": "2022-06-30", "filed": "2023-02-15", "val": 200.0, "form": "10-K", "accn": "J2", "duration_days": 91},
+        {"ticker": "JNJ", "concept": CONCEPT, "end": "2022-09-30", "filed": "2023-02-15", "val": 300.0, "form": "10-K", "accn": "J3", "duration_days": 91},
+        {"ticker": "JNJ", "concept": CONCEPT, "end": "2022-12-31", "filed": "2023-02-15", "val": 400.0, "form": "10-K", "accn": "J4", "duration_days": 92},
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    q = PitQuery(path)
+    result = q.ttm("JNJ", CONCEPT)
+    assert not result.empty
+    last = result.iloc[-1]
+    assert last["ttm_val"] == pytest.approx(1000.0)
+    assert last["n_periods"] == 4
+
+
+def test_ttm_cross_section_quarterly_data_from_10k(tmp_path):
+    """ttm_cross_section must also pick up quarterly data from 10-K filings."""
+    records = [
+        {"ticker": "JNJ", "concept": CONCEPT, "end": "2022-03-31", "filed": "2023-02-15", "val": 100.0, "form": "10-K", "accn": "J1", "duration_days": 90},
+        {"ticker": "JNJ", "concept": CONCEPT, "end": "2022-06-30", "filed": "2023-02-15", "val": 200.0, "form": "10-K", "accn": "J2", "duration_days": 91},
+        {"ticker": "JNJ", "concept": CONCEPT, "end": "2022-09-30", "filed": "2023-02-15", "val": 300.0, "form": "10-K", "accn": "J3", "duration_days": 91},
+        {"ticker": "JNJ", "concept": CONCEPT, "end": "2022-12-31", "filed": "2023-02-15", "val": 400.0, "form": "10-K", "accn": "J4", "duration_days": 92},
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    q = PitQuery(path)
+    result = q.ttm_cross_section(CONCEPT, "2023-06-01", max_staleness_days=365)
+    row = result.iloc[0]
+    assert row["ttm_val"] == pytest.approx(1000.0)
+    assert row["n_periods"] == 4
+
+
 def test_history_returns_latest_filed_per_end(tmp_path):
     """history() must return the restated (latest-filed) value for each period end."""
     records = [

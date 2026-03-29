@@ -4,6 +4,34 @@ from pathlib import Path
 
 import pandas as pd
 
+# Duration thresholds for period classification.
+# Quarterly: 60–105 days covers standard 3-month periods including fiscal-calendar
+# quirks (e.g. JNJ Q4 spans Oct–Jan = 97 days).
+# Annual: 340–380 days covers 12-month fiscal years including 52/53-week calendars.
+_Q_DURATION_MIN = 60
+_Q_DURATION_MAX = 105
+_A_DURATION_MIN = 340
+_A_DURATION_MAX = 380
+
+
+def _is_quarterly(df: pd.DataFrame) -> "pd.Series[bool]":
+    """True for rows that represent a discrete quarterly period (60–105 days).
+
+    Works regardless of the filing form — quarterly periods sometimes appear in
+    10-K filings as comparative data (e.g. JNJ, which reports discrete quarters
+    only inside annual 10-K filings in EDGAR).
+    """
+    return (df["duration_days"] >= _Q_DURATION_MIN) & (df["duration_days"] <= _Q_DURATION_MAX)
+
+
+def _is_annual_10k(df: pd.DataFrame) -> "pd.Series[bool]":
+    """True for rows that represent a full-year period from a 10-K filing (340–380 days)."""
+    return (
+        (df["form"] == "10-K")
+        & (df["duration_days"] >= _A_DURATION_MIN)
+        & (df["duration_days"] <= _A_DURATION_MAX)
+    )
+
 
 def _snapshot_events(grp: pd.DataFrame) -> pd.DataFrame:
     """Compute point-in-time snapshot events for one ticker/concept.
@@ -35,6 +63,65 @@ def _snapshot_events(grp: pd.DataFrame) -> pd.DataFrame:
         rows.append({"filed": current_filed, "end": latest_end, "val": val, "form": form})
 
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["filed", "end", "val", "form"])
+
+
+def _derive_q4_rows(df_q: pd.DataFrame, df_k: pd.DataFrame) -> pd.DataFrame:
+    """Derive synthetic Q4 rows from 10-K annual filings for one ticker.
+
+    For each 10-K (end = FY_end, filed = K_filed, val = Annual), finds the
+    three 10-Q filings within that fiscal year (end strictly in
+    (FY_end − 366d, FY_end)) that were themselves filed on or before K_filed.
+    If exactly 3 such quarterly periods are present (Q1, Q2, Q3), computes:
+
+        Q4_val = Annual_val − Q1_val − Q2_val − Q3_val
+
+    and returns a row with end=FY_end, filed=K_filed, val=Q4_val.
+
+    Rows where fewer than 3 quarters are found are skipped: returning
+    Annual − Q1 − Q2 would silently absorb multiple missing quarters into
+    a single synthetic value, producing a wrong TTM.
+
+    The returned rows carry the 10-K's filing date, so the staleness check in
+    ttm / ttm_cross_section uses the 10-K date (not the last 10-Q date).
+
+    Args:
+        df_q: All 10-Q rows for one ticker (any sort order).
+        df_k: All 10-K rows for one ticker (any sort order).
+
+    Returns DataFrame with columns: end, filed, val.
+    """
+    if df_k.empty or df_q.empty:
+        return pd.DataFrame(columns=["end", "filed", "val"])
+
+    rows = []
+    for _, k_row in df_k.iterrows():
+        fy_end = k_row["end"]
+        k_filed = k_row["filed"]
+        annual_val = k_row["val"]
+
+        fy_start = fy_end - pd.Timedelta(days=366)
+
+        # 10-Q quarters within this fiscal year that were filed by the 10-K date.
+        q_in_year = df_q[
+            (df_q["end"] > fy_start)
+            & (df_q["end"] < fy_end)
+            & (df_q["filed"] <= k_filed)
+        ].copy()
+
+        if q_in_year.empty:
+            continue
+
+        # PIT dedup: keep latest-filed version of each period end.
+        q_in_year = q_in_year.sort_values("filed").drop_duplicates(subset=["end"], keep="last")
+
+        if len(q_in_year) != 3:
+            # Require all three quarters present to safely isolate Q4.
+            continue
+
+        q4_val = annual_val - q_in_year["val"].sum()
+        rows.append({"end": fy_end, "filed": k_filed, "val": q4_val})
+
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["end", "filed", "val"])
 
 
 def _ttm_events(grp: pd.DataFrame, min_periods: int = 4) -> pd.DataFrame:
@@ -78,6 +165,13 @@ class PitQuery:
         self.data = pd.read_parquet(parquet_path)
         self.data["filed"] = pd.to_datetime(self.data["filed"], errors="coerce")
         self.data["end"] = pd.to_datetime(self.data["end"], errors="coerce")
+        # Ensure duration_days exists for period classification. The parser always
+        # writes this column; for test fixtures or legacy parquets without it,
+        # infer from form (10-Q → 91, 10-K → 365) as a safe approximation.
+        if "duration_days" not in self.data.columns:
+            self.data["duration_days"] = (
+                self.data["form"].map({"10-Q": 91, "10-K": 365}).fillna(-1)
+            )
 
     # ------------------------------------------------------------------
     # Public API
@@ -207,15 +301,24 @@ class PitQuery:
 
         Returns DataFrame with columns: ticker, concept, filed, ttm_val, n_periods
         """
-        mask = (
-            (self.data["ticker"] == ticker)
-            & (self.data["concept"] == concept)
-            & (self.data["form"] == "10-Q")
-        )
-        sub = self.data.loc[mask].sort_values("filed")
+        base_mask = (self.data["ticker"] == ticker) & (self.data["concept"] == concept)
+        # Use duration_days to identify quarterly periods (60–105 days), regardless
+        # of form. Some companies (e.g. JNJ) report discrete quarterly values only
+        # inside 10-K filings as comparative data; form='10-Q' would miss them.
+        sub = self.data.loc[base_mask & _is_quarterly(self.data)].sort_values("filed")
+        sub_k = self.data.loc[base_mask & _is_annual_10k(self.data)]
 
         if sub.empty:
             return pd.DataFrame(columns=["ticker", "concept", "filed", "ttm_val", "n_periods"])
+
+        # Inject synthetic Q4 rows derived from 10-K annual filings so that
+        # December-FY companies (and others whose Q4 only appears in a 10-K)
+        # are not falsely nullified by the staleness check.
+        q4_rows = _derive_q4_rows(sub, sub_k)
+        if not q4_rows.empty:
+            sub = pd.concat(
+                [sub[["end", "filed", "val"]], q4_rows], ignore_index=True
+            ).sort_values("filed")
 
         result = _ttm_events(sub, min_periods=min_periods)
         if result.empty:
@@ -275,16 +378,32 @@ class PitQuery:
         universe = tickers if tickers is not None else self.data["ticker"].unique().tolist()
 
         # Pre-filter once — avoid redundant scans inside the per-ticker loop.
-        mask = (self.data["concept"] == concept) & (self.data["form"] == "10-Q")
+        # Use duration_days to classify periods, not form: some companies (e.g. JNJ)
+        # only report discrete quarterly values as comparative data inside 10-K filings.
+        concept_mask = self.data["concept"] == concept
         if tickers is not None:
-            mask &= self.data["ticker"].isin(universe)
-        df_q = self.data.loc[mask].sort_values(["ticker", "filed"])
+            concept_mask &= self.data["ticker"].isin(universe)
+        df_q = self.data.loc[concept_mask & _is_quarterly(self.data)].sort_values(["ticker", "filed"])
+        df_k = self.data.loc[concept_mask & _is_annual_10k(self.data)]
+
+        # Group 10-K rows by ticker for O(1) lookup inside the per-ticker loop.
+        k_by_ticker = {t: g for t, g in df_k.groupby("ticker", sort=False)} if not df_k.empty else {}
 
         # Compute TTM events for all tickers in one grouped pass.
+        # For tickers whose Q4 is only in the 10-K (e.g. December-FY companies),
+        # inject a synthetic Q4 = Annual − Q1 − Q2 − Q3 before running _ttm_events.
         ttm_frames: list[pd.DataFrame] = []
         tickers_with_data: set[str] = set()
         for ticker, grp in df_q.groupby("ticker", sort=False):
-            events = _ttm_events(grp, min_periods=min_periods)
+            grp_k = k_by_ticker.get(ticker, pd.DataFrame())
+            q4_rows = _derive_q4_rows(grp, grp_k)
+            if not q4_rows.empty:
+                combined = pd.concat(
+                    [grp[["end", "filed", "val"]], q4_rows], ignore_index=True
+                ).sort_values("filed")
+            else:
+                combined = grp
+            events = _ttm_events(combined, min_periods=min_periods)
             if not events.empty:
                 events["ticker"] = ticker
                 ttm_frames.append(events)
