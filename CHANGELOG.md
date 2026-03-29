@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-03-29
+
+### Fixed
+- **Parser cross-filing dedup kept latest instead of earliest**: the initial parser kept the most-recently-filed record per `(concept, end)`, inflating PIT filing dates by months or years for companies with restatements (e.g. JNJ post-Kenvue spinoff). The dedup now keeps the **earliest** distinct-value filing, preserving the original PIT date. Affected parquets must be rebuilt with `pitedgar build --force`.
+- **`pitedgar build` missing `--force` flag**: the CLI `build` command did not expose the `force` parameter of `parse_all()`. Added `--force` flag so re-parsing can be triggered without manually deleting the parquet.
+
+### Changed
+- **Example `pit_earnings_csv.py`**: `max_staleness_days` corrected to 100 (was inflated to work around the parser bug above).
+
 ## [0.2.0] - 2026-03-28
 
 ### Fixed

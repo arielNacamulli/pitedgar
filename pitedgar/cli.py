@@ -52,11 +52,13 @@ def cmd_fetch(force: bool, identity: str, data_dir: str) -> None:
 @click.option("--identity", required=True,
               help='SEC identity string, e.g. "Name name@email.com".')
 @click.option("--data-dir", default="./data", show_default=True)
-def cmd_build(identity: str, data_dir: str) -> None:
+@click.option("--force", is_flag=True, default=False,
+              help="Re-parse even if pit_financials.parquet already exists.")
+def cmd_build(identity: str, data_dir: str, force: bool) -> None:
     """Parse all local JSON facts into the master PIT parquet."""
     config = PitEdgarConfig(edgar_identity=identity, data_dir=Path(data_dir))
     cik_map = pd.read_parquet(config.data_dir / "ticker_cik_map.parquet")
-    master = parse_all(config, cik_map)
+    master = parse_all(config, cik_map, force=force)
     click.echo(f"Built master parquet: {len(master):,} rows")
 
 
