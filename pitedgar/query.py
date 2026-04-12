@@ -4,33 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-# Duration thresholds for period classification.
-# Quarterly: 60–105 days covers standard 3-month periods including fiscal-calendar
-# quirks (e.g. JNJ Q4 spans Oct–Jan = 97 days).
-# Annual: 340–380 days covers 12-month fiscal years including 52/53-week calendars.
-_Q_DURATION_MIN = 60
-_Q_DURATION_MAX = 105
-_A_DURATION_MIN = 340
-_A_DURATION_MAX = 380
-
-
-def _is_quarterly(df: pd.DataFrame) -> "pd.Series[bool]":
-    """True for rows that represent a discrete quarterly period (60–105 days).
-
-    Works regardless of the filing form — quarterly periods sometimes appear in
-    10-K filings as comparative data (e.g. JNJ, which reports discrete quarters
-    only inside annual 10-K filings in EDGAR).
-    """
-    return (df["duration_days"] >= _Q_DURATION_MIN) & (df["duration_days"] <= _Q_DURATION_MAX)
-
-
-def _is_annual_10k(df: pd.DataFrame) -> "pd.Series[bool]":
-    """True for rows that represent a full-year period from a 10-K filing (340–380 days)."""
-    return (
-        (df["form"] == "10-K")
-        & (df["duration_days"] >= _A_DURATION_MIN)
-        & (df["duration_days"] <= _A_DURATION_MAX)
-    )
+from pitedgar.periods import is_annual, is_quarterly
 
 
 def _snapshot_events(grp: pd.DataFrame) -> pd.DataFrame:
@@ -305,8 +279,12 @@ class PitQuery:
         # Use duration_days to identify quarterly periods (60–105 days), regardless
         # of form. Some companies (e.g. JNJ) report discrete quarterly values only
         # inside 10-K filings as comparative data; form='10-Q' would miss them.
-        sub = self.data.loc[base_mask & _is_quarterly(self.data)].sort_values("filed")
-        sub_k = self.data.loc[base_mask & _is_annual_10k(self.data)]
+        sub = self.data.loc[
+            base_mask & is_quarterly(self.data["duration_days"])
+        ].sort_values("filed")
+        sub_k = self.data.loc[
+            base_mask & is_annual(self.data["duration_days"], self.data["form"])
+        ]
 
         if sub.empty:
             return pd.DataFrame(columns=["ticker", "concept", "filed", "ttm_val", "n_periods"])
@@ -383,8 +361,12 @@ class PitQuery:
         concept_mask = self.data["concept"] == concept
         if tickers is not None:
             concept_mask &= self.data["ticker"].isin(universe)
-        df_q = self.data.loc[concept_mask & _is_quarterly(self.data)].sort_values(["ticker", "filed"])
-        df_k = self.data.loc[concept_mask & _is_annual_10k(self.data)]
+        df_q = self.data.loc[
+            concept_mask & is_quarterly(self.data["duration_days"])
+        ].sort_values(["ticker", "filed"])
+        df_k = self.data.loc[
+            concept_mask & is_annual(self.data["duration_days"], self.data["form"])
+        ]
 
         # Group 10-K rows by ticker for O(1) lookup inside the per-ticker loop.
         k_by_ticker = {t: g for t, g in df_k.groupby("ticker", sort=False)} if not df_k.empty else {}

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-04-12
+
+### Fixed
+- **Period classification inconsistency between parser and query**: the parser used 60–100 days for "quarterly" during within-filing dedup while the query layer used 60–105 days for Q4 derivation, TTM, and snapshot selection. Companies with ~101–105 day quarters (e.g. JNJ Q4) could be misclassified during dedup. Both layers now share a single source of truth in the new `pitedgar.periods` module (60–105 days).
+
+### Changed
+- **New `pitedgar.periods` module**: centralizes day-count thresholds (`Q_MIN`/`Q_MAX`/`A_MIN`/`A_MAX`) and exposes `is_quarterly` / `is_annual` boolean masks. Internal refactor; no public API changes.
+
 ## [0.2.2] - 2026-04-12
 
 ### Fixed
