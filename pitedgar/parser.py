@@ -8,6 +8,7 @@ from loguru import logger
 from tqdm import tqdm
 
 from pitedgar.config import PitEdgarConfig, CONCEPT_ALIASES
+from pitedgar.periods import is_quarterly
 
 # Units to attempt per concept, in priority order.
 # EPS and share concepts use "shares"; everything else USD.
@@ -128,9 +129,9 @@ def parse_company(
     df["duration_days"] = (df["end"] - df["start"]).dt.days.where(df["start"].notna(), -1)
 
     # Within-filing dedup: a single filing can contain both a discrete quarter and a YTD
-    # cumulative entry for the same (concept, end). Prefer the discrete quarter (60-100 days).
+    # cumulative entry for the same (concept, end). Prefer the discrete quarter.
     # We dedup on (concept, end, filed) so restatements filed on different dates are preserved.
-    df["_is_quarterly"] = ((df["duration_days"] >= 60) & (df["duration_days"] <= 100)).astype(int)
+    df["_is_quarterly"] = is_quarterly(df["duration_days"]).astype(int)
     df = (
         df.sort_values(["filed", "_is_quarterly"])
         .drop_duplicates(subset=["concept", "end", "filed"], keep="last")
