@@ -57,6 +57,17 @@ def build_cik_map(tickers: list[str], config: PitEdgarConfig, force: bool = Fals
             logger.warning(f"Could not resolve ticker '{ticker}': {exc}")
         time.sleep(0.1)
 
+    if not records:
+        # All new tickers failed resolution (e.g. historical/delisted symbols).
+        # Return the existing map unchanged rather than crashing on set_index.
+        logger.info("No new tickers resolved; returning existing CIK map unchanged.")
+        if not existing_df.empty:
+            return existing_df
+        return pd.DataFrame(
+            index=pd.Index([], name="ticker"),
+            columns=["cik", "name", "sic", "fiscal_year_end", "exchange"],
+        )
+
     new_df = pd.DataFrame(records).set_index("ticker")
 
     if not existing_df.empty:

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-04-12
+
+### Fixed
+- **`build_cik_map` crashed when no new tickers resolved**: if every new ticker failed resolution (e.g. delisted/historical symbols), the empty `records` list raised `KeyError: 'ticker'` on `set_index`. Now returns the existing map unchanged, or an empty typed frame when no map exists yet.
+
 ## [0.2.1] - 2026-03-29
 
 ### Fixed
