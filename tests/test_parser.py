@@ -90,6 +90,7 @@ def test_parse_company_returns_correct_columns(facts_dir):
         "val",
         "form",
         "accn",
+        "scale_corrected",
     }
 
 

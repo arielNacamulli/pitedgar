@@ -8,6 +8,31 @@ from loguru import logger
 
 from pitedgar.config import PitEdgarConfig
 
+# Exceptions we expect edgartools to raise for unresolvable tickers (delisted,
+# typos, historical symbols). Anything outside this set — network/auth/parse
+# errors — should propagate so operators notice and fix the environment.
+_TICKER_LOOKUP_SKIPPABLE: tuple[type[BaseException], ...] = (
+    ValueError,
+    KeyError,
+    LookupError,
+    AttributeError,
+)
+
+
+def _write_parquet_atomic(df: pd.DataFrame, dest_path) -> None:
+    """Write *df* to *dest_path* via a .tmp sidecar + atomic rename.
+
+    Prevents a crash mid-write from leaving a truncated parquet file behind
+    that a later run would then try to read and fail on.
+    """
+    tmp_path = dest_path.with_suffix(dest_path.suffix + ".tmp")
+    try:
+        df.to_parquet(tmp_path)
+        tmp_path.replace(dest_path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
 
 def build_cik_map(tickers: list[str], config: PitEdgarConfig, force: bool = False) -> pd.DataFrame:
     """Resolve a list of tickers to CIK numbers via edgartools.
@@ -55,8 +80,8 @@ def build_cik_map(tickers: list[str], config: PitEdgarConfig, force: bool = Fals
                 }
             )
             logger.debug(f"{ticker} → CIK {cik_padded}")
-        except Exception as exc:
-            logger.warning(f"Could not resolve ticker '{ticker}': {exc}")
+        except _TICKER_LOOKUP_SKIPPABLE as exc:
+            logger.warning(f"Could not resolve ticker '{ticker}': {exc!r}")
         time.sleep(0.1)
 
     if not records:
@@ -74,6 +99,6 @@ def build_cik_map(tickers: list[str], config: PitEdgarConfig, force: bool = Fals
 
     df = pd.concat([existing_df, new_df]) if not existing_df.empty else new_df
 
-    df.to_parquet(out_path)
+    _write_parquet_atomic(df, out_path)
     logger.info(f"CIK map saved: {out_path} ({len(df)} rows, {len(new_df)} new)")
     return df

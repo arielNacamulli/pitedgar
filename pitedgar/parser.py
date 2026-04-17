@@ -119,13 +119,17 @@ def parse_company(
     df = df.dropna(subset=["end", "filed"])
 
     # Scale detection: some filers report USD values in thousands instead of dollars.
-    # If the maximum absolute USD value across all concepts is < $1M, the company is
-    # almost certainly mis-scaled — correct silently by multiplying by 1000.
+    # If the maximum absolute USD value across all USD concepts is < $1M, the company
+    # is almost certainly mis-scaled — rescale by 1000 and flag the affected rows in
+    # `scale_corrected` so downstream consumers can audit which values were adjusted.
+    df["scale_corrected"] = False
     usd_mask = ~df["concept"].str.split(":").str[-1].isin(_SHARE_CONCEPTS)
     if usd_mask.any() and df.loc[usd_mask, "val"].abs().max() < 1_000_000:
         df.loc[usd_mask, "val"] *= 1000
+        df.loc[usd_mask, "scale_corrected"] = True
+        logger.debug(f"CIK {cik_padded}: applied 1000x scale correction to {int(usd_mask.sum())} USD rows")
 
-    # Calcola la durata in giorni; -1 se start mancante (entry istantanee, es. balance sheet)
+    # Duration in days; -1 if start missing (instantaneous entries, e.g. balance sheet).
     df["duration_days"] = (df["end"] - df["start"]).dt.days.where(df["start"].notna(), -1)
 
     # Within-filing dedup: a single filing can contain both a discrete quarter and a YTD
@@ -190,6 +194,14 @@ def parse_all(config: PitEdgarConfig, cik_map: pd.DataFrame, force: bool = False
 
     master = pd.concat(all_frames, ignore_index=True)
 
-    master.to_parquet(out_path, index=False)
+    # Atomic write: write to .tmp then rename, so a crash mid-write never leaves
+    # a truncated parquet behind that later reads would choke on.
+    tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
+    try:
+        master.to_parquet(tmp_path, index=False)
+        tmp_path.replace(out_path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
     logger.info(f"Master parquet saved: {out_path} ({len(master):,} rows)")
     return master
