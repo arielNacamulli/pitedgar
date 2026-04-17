@@ -25,7 +25,8 @@ Pipeline stages (run once to build the parquet)::
     parse_all(config, cik_map)
 """
 
-__version__ = "0.2.0"
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 
 from pitedgar.config import (
     CONCEPT_ALIASES,
@@ -33,6 +34,11 @@ from pitedgar.config import (
     DEFAULT_FORMS,
     PitEdgarConfig,
 )
+
+try:
+    __version__ = _pkg_version("pitedgar")
+except PackageNotFoundError:
+    __version__ = "0.0.0+unknown"
 from pitedgar.downloader import download_bulk
 from pitedgar.mapping import build_cik_map
 from pitedgar.parser import parse_all
