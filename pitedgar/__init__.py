@@ -28,26 +28,23 @@ Pipeline stages (run once to build the parquet)::
 __version__ = "0.2.0"
 
 from pitedgar.config import (
-    PitEdgarConfig,
+    CONCEPT_ALIASES,
     DEFAULT_CONCEPTS,
     DEFAULT_FORMS,
-    CONCEPT_ALIASES,
+    PitEdgarConfig,
 )
-from pitedgar.mapping import build_cik_map
 from pitedgar.downloader import download_bulk
+from pitedgar.mapping import build_cik_map
 from pitedgar.parser import parse_all
 from pitedgar.query import PitQuery
 
 __all__ = [
-    # Query API
-    "PitQuery",
-    # Pipeline stages
+    "CONCEPT_ALIASES",
+    "DEFAULT_CONCEPTS",
+    "DEFAULT_FORMS",
     "PitEdgarConfig",
+    "PitQuery",
     "build_cik_map",
     "download_bulk",
     "parse_all",
-    # Constants (inspect or override via PitEdgarConfig)
-    "DEFAULT_CONCEPTS",
-    "DEFAULT_FORMS",
-    "CONCEPT_ALIASES",
 ]

@@ -77,9 +77,7 @@ def _derive_q4_rows(df_q: pd.DataFrame, df_k: pd.DataFrame) -> pd.DataFrame:
 
         # 10-Q quarters within this fiscal year that were filed by the 10-K date.
         q_in_year = df_q[
-            (df_q["end"] > fy_start)
-            & (df_q["end"] < fy_end)
-            & (df_q["filed"] <= k_filed)
+            (df_q["end"] > fy_start) & (df_q["end"] < fy_end) & (df_q["filed"] <= k_filed)
         ].copy()
 
         if q_in_year.empty:
@@ -143,9 +141,7 @@ class PitQuery:
         # writes this column; for test fixtures or legacy parquets without it,
         # infer from form (10-Q → 91, 10-K → 365) as a safe approximation.
         if "duration_days" not in self.data.columns:
-            self.data["duration_days"] = (
-                self.data["form"].map({"10-Q": 91, "10-K": 365}).fillna(-1)
-            )
+            self.data["duration_days"] = self.data["form"].map({"10-Q": 91, "10-K": 365}).fillna(-1)
 
     # ------------------------------------------------------------------
     # Public API
@@ -279,12 +275,8 @@ class PitQuery:
         # Use duration_days to identify quarterly periods (60–105 days), regardless
         # of form. Some companies (e.g. JNJ) report discrete quarterly values only
         # inside 10-K filings as comparative data; form='10-Q' would miss them.
-        sub = self.data.loc[
-            base_mask & is_quarterly(self.data["duration_days"])
-        ].sort_values("filed")
-        sub_k = self.data.loc[
-            base_mask & is_annual(self.data["duration_days"], self.data["form"])
-        ]
+        sub = self.data.loc[base_mask & is_quarterly(self.data["duration_days"])].sort_values("filed")
+        sub_k = self.data.loc[base_mask & is_annual(self.data["duration_days"], self.data["form"])]
 
         if sub.empty:
             return pd.DataFrame(columns=["ticker", "concept", "filed", "ttm_val", "n_periods"])
@@ -294,9 +286,7 @@ class PitQuery:
         # are not falsely nullified by the staleness check.
         q4_rows = _derive_q4_rows(sub, sub_k)
         if not q4_rows.empty:
-            sub = pd.concat(
-                [sub[["end", "filed", "val"]], q4_rows], ignore_index=True
-            ).sort_values("filed")
+            sub = pd.concat([sub[["end", "filed", "val"]], q4_rows], ignore_index=True).sort_values("filed")
 
         result = _ttm_events(sub, min_periods=min_periods)
         if result.empty:
@@ -361,28 +351,29 @@ class PitQuery:
         concept_mask = self.data["concept"] == concept
         if tickers is not None:
             concept_mask &= self.data["ticker"].isin(universe)
-        df_q = self.data.loc[
-            concept_mask & is_quarterly(self.data["duration_days"])
-        ].sort_values(["ticker", "filed"])
-        df_k = self.data.loc[
-            concept_mask & is_annual(self.data["duration_days"], self.data["form"])
-        ]
+        df_q = self.data.loc[concept_mask & is_quarterly(self.data["duration_days"])].sort_values(
+            ["ticker", "filed"]
+        )
+        df_k = self.data.loc[concept_mask & is_annual(self.data["duration_days"], self.data["form"])]
 
         # Group 10-K rows by ticker for O(1) lookup inside the per-ticker loop.
-        k_by_ticker = {t: g for t, g in df_k.groupby("ticker", sort=False)} if not df_k.empty else {}
+        k_by_ticker: dict = {}
+        if not df_k.empty:
+            for t, g in df_k.groupby("ticker", sort=False):
+                k_by_ticker[t] = g
 
         # Compute TTM events for all tickers in one grouped pass.
         # For tickers whose Q4 is only in the 10-K (e.g. December-FY companies),
         # inject a synthetic Q4 = Annual − Q1 − Q2 − Q3 before running _ttm_events.
         ttm_frames: list[pd.DataFrame] = []
-        tickers_with_data: set[str] = set()
+        tickers_with_data: set = set()
         for ticker, grp in df_q.groupby("ticker", sort=False):
             grp_k = k_by_ticker.get(ticker, pd.DataFrame())
             q4_rows = _derive_q4_rows(grp, grp_k)
             if not q4_rows.empty:
-                combined = pd.concat(
-                    [grp[["end", "filed", "val"]], q4_rows], ignore_index=True
-                ).sort_values("filed")
+                combined = pd.concat([grp[["end", "filed", "val"]], q4_rows], ignore_index=True).sort_values(
+                    "filed"
+                )
             else:
                 combined = grp
             events = _ttm_events(combined, min_periods=min_periods)
@@ -394,13 +385,17 @@ class PitQuery:
         # Build cross-product (universe × dates).
         # merge_asof requires the key column to be globally monotonic, so sort by
         # as_of_date only (not ticker first); by="ticker" handles per-group matching.
-        cross = pd.DataFrame(
-            [(t, d) for t in universe for d in dates],
-            columns=["ticker", "as_of_date"],
-        ).sort_values("as_of_date").reset_index(drop=True)
+        cross = (
+            pd.DataFrame(
+                [(t, d) for t in universe for d in dates],
+                columns=["ticker", "as_of_date"],
+            )
+            .sort_values("as_of_date")
+            .reset_index(drop=True)
+        )
 
         if not ttm_frames:
-            cross[["ttm_val", "n_periods", "filed"]] = [float("nan"), 0, pd.NaT]
+            cross[["ttm_val", "n_periods", "filed"]] = [float("nan"), 0, pd.NaT]  # type: ignore[list-item,assignment]
             return cross.sort_values(["as_of_date", "ticker"]).reset_index(drop=True)
 
         # Sort by filed globally so the key column is monotonic for merge_asof.
@@ -429,7 +424,7 @@ class PitQuery:
                 [(t, d) for t in missing for d in dates],
                 columns=["ticker", "as_of_date"],
             )
-            filler[["ttm_val", "n_periods", "filed"]] = [float("nan"), 0, pd.NaT]
+            filler[["ttm_val", "n_periods", "filed"]] = [float("nan"), 0, pd.NaT]  # type: ignore[list-item,assignment]
             result = pd.concat([result, filler], ignore_index=True)
 
         return (
@@ -482,7 +477,7 @@ class PitQuery:
 
         # Compute snapshot step-functions for all tickers in one grouped pass.
         snap_frames: list[pd.DataFrame] = []
-        tickers_with_data: set[str] = set()
+        tickers_with_data: set = set()
         for ticker, grp in df_c.groupby("ticker", sort=False):
             events = _snapshot_events(grp)
             if not events.empty:
@@ -493,10 +488,14 @@ class PitQuery:
         # Build cross-product (universe × dates).
         # merge_asof requires the key column to be globally monotonic, so sort by
         # as_of_date only (not ticker first); by="ticker" handles per-group matching.
-        cross = pd.DataFrame(
-            [(t, d) for t in universe for d in dates],
-            columns=["ticker", "as_of_date"],
-        ).sort_values("as_of_date").reset_index(drop=True)
+        cross = (
+            pd.DataFrame(
+                [(t, d) for t in universe for d in dates],
+                columns=["ticker", "as_of_date"],
+            )
+            .sort_values("as_of_date")
+            .reset_index(drop=True)
+        )
 
         if not snap_frames:
             cross[["val", "filed", "end", "form"]] = [float("nan"), pd.NaT, pd.NaT, None]

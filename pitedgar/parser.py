@@ -7,7 +7,7 @@ import pandas as pd
 from loguru import logger
 from tqdm import tqdm
 
-from pitedgar.config import PitEdgarConfig, CONCEPT_ALIASES
+from pitedgar.config import CONCEPT_ALIASES, PitEdgarConfig
 from pitedgar.periods import is_quarterly
 
 # Units to attempt per concept, in priority order.
@@ -47,7 +47,7 @@ def parse_company(
         logger.debug(f"No JSON for CIK {cik_padded}, skipping.")
         return pd.DataFrame()
 
-    with open(json_path, "r", encoding="utf-8") as fh:
+    with open(json_path, encoding="utf-8") as fh:
         data = json.load(fh)
 
     usgaap = data.get("facts", {}).get("us-gaap", {})
@@ -65,7 +65,7 @@ def parse_company(
     for concept_full in concepts:
         # Try the canonical concept first, then any aliases (e.g. post-ASC 606 revenue tag).
         # Store all rows under the canonical name regardless of which tag matched.
-        candidates = [concept_full] + alias_lookup.get(concept_full, [])
+        candidates = [concept_full, *alias_lookup.get(concept_full, [])]
         unit_entries: list[dict] | None = None
         canonical_short = concept_full.split(":", 1)[-1]
 
@@ -181,7 +181,7 @@ def parse_all(config: PitEdgarConfig, cik_map: pd.DataFrame, force: bool = False
         )
         if df.empty:
             continue
-        df.insert(0, "ticker", ticker)
+        df.insert(0, "ticker", str(ticker))
         all_frames.append(df)
 
     if not all_frames:

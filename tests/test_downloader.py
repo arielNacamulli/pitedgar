@@ -1,7 +1,7 @@
 """Tests for downloader.py — cache-skip behaviour."""
 
 import zipfile
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 

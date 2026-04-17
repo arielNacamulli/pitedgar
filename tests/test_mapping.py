@@ -1,9 +1,7 @@
 """Tests for mapping.py"""
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pandas as pd
 import pytest
 
 from pitedgar.config import PitEdgarConfig
@@ -130,5 +128,5 @@ def test_lowercase_tickers_normalized(mock_sleep, mock_company_cls, mock_set_ide
     assert "AAPL" in result.index
 
     # Second call with uppercase should hit cache, not EDGAR again
-    result2 = build_cik_map(["AAPL"], config)
+    build_cik_map(["AAPL"], config)
     assert mock_company_cls.call_count == 1

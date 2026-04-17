@@ -18,14 +18,18 @@ def cli() -> None:
 
 
 @cli.command("map")
-@click.option("--tickers", "tickers_file", required=True, type=click.Path(exists=True),
-              help="Path to a text file with one ticker per line.")
-@click.option("--identity", required=True,
-              help='SEC identity string, e.g. "Name name@email.com".')
-@click.option("--data-dir", default="./data", show_default=True,
-              help="Directory where outputs are saved.")
-@click.option("--force", is_flag=True, default=False,
-              help="Re-resolve all tickers, ignoring the existing cache.")
+@click.option(
+    "--tickers",
+    "tickers_file",
+    required=True,
+    type=click.Path(exists=True),
+    help="Path to a text file with one ticker per line.",
+)
+@click.option("--identity", required=True, help='SEC identity string, e.g. "Name name@email.com".')
+@click.option("--data-dir", default="./data", show_default=True, help="Directory where outputs are saved.")
+@click.option(
+    "--force", is_flag=True, default=False, help="Re-resolve all tickers, ignoring the existing cache."
+)
 def cmd_map(tickers_file: str, identity: str, data_dir: str, force: bool) -> None:
     """Resolve tickers to CIK numbers and save the mapping."""
     tickers = Path(tickers_file).read_text().splitlines()
@@ -36,10 +40,8 @@ def cmd_map(tickers_file: str, identity: str, data_dir: str, force: bool) -> Non
 
 
 @cli.command("fetch")
-@click.option("--force", is_flag=True, default=False,
-              help="Re-extract even if facts_dir already populated.")
-@click.option("--identity", required=True,
-              help='SEC identity string, e.g. "Name name@email.com".')
+@click.option("--force", is_flag=True, default=False, help="Re-extract even if facts_dir already populated.")
+@click.option("--identity", required=True, help='SEC identity string, e.g. "Name name@email.com".')
 @click.option("--data-dir", default="./data", show_default=True)
 def cmd_fetch(force: bool, identity: str, data_dir: str) -> None:
     """Download and extract the SEC companyfacts bulk ZIP."""
@@ -49,11 +51,11 @@ def cmd_fetch(force: bool, identity: str, data_dir: str) -> None:
 
 
 @cli.command("build")
-@click.option("--identity", required=True,
-              help='SEC identity string, e.g. "Name name@email.com".')
+@click.option("--identity", required=True, help='SEC identity string, e.g. "Name name@email.com".')
 @click.option("--data-dir", default="./data", show_default=True)
-@click.option("--force", is_flag=True, default=False,
-              help="Re-parse even if pit_financials.parquet already exists.")
+@click.option(
+    "--force", is_flag=True, default=False, help="Re-parse even if pit_financials.parquet already exists."
+)
 def cmd_build(identity: str, data_dir: str, force: bool) -> None:
     """Parse all local JSON facts into the master PIT parquet."""
     config = PitEdgarConfig(edgar_identity=identity, data_dir=Path(data_dir))

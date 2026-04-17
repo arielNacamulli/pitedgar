@@ -56,6 +56,6 @@ def download_bulk(config: PitEdgarConfig, force: bool = False) -> Path:
                 zf.extract(member, facts_dir)
         logger.info("Extraction complete.")
     else:
-        logger.info(f"Facts dir already populated, skipping extraction (use force=True to override).")
+        logger.info("Facts dir already populated, skipping extraction (use force=True to override).")
 
     return facts_dir

@@ -1,9 +1,11 @@
 """Step 1: resolve ticker → CIK via edgartools."""
 
 import time
+
 import edgar
 import pandas as pd
 from loguru import logger
+
 from pitedgar.config import PitEdgarConfig
 
 
@@ -70,10 +72,7 @@ def build_cik_map(tickers: list[str], config: PitEdgarConfig, force: bool = Fals
 
     new_df = pd.DataFrame(records).set_index("ticker")
 
-    if not existing_df.empty:
-        df = pd.concat([existing_df, new_df])
-    else:
-        df = new_df
+    df = pd.concat([existing_df, new_df]) if not existing_df.empty else new_df
 
     df.to_parquet(out_path)
     logger.info(f"CIK map saved: {out_path} ({len(df)} rows, {len(new_df)} new)")

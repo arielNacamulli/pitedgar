@@ -1,13 +1,12 @@
 """Tests for parser.py"""
 
 import json
-from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from pitedgar.config import PitEdgarConfig
-from pitedgar.parser import parse_company, parse_all
+from pitedgar.parser import parse_all, parse_company
 
 SAMPLE_FACTS = {
     "facts": {
@@ -15,19 +14,54 @@ SAMPLE_FACTS = {
             "Revenues": {
                 "units": {
                     "USD": [
-                        {"start": "2022-01-01", "end": "2022-12-31", "filed": "2023-02-01", "val": 1000000, "form": "10-K", "accn": "A1"},
-                        {"start": "2022-01-01", "end": "2022-12-31", "filed": "2023-03-15", "val": 1050000, "form": "10-K", "accn": "A2"},
+                        {
+                            "start": "2022-01-01",
+                            "end": "2022-12-31",
+                            "filed": "2023-02-01",
+                            "val": 1000000,
+                            "form": "10-K",
+                            "accn": "A1",
+                        },
+                        {
+                            "start": "2022-01-01",
+                            "end": "2022-12-31",
+                            "filed": "2023-03-15",
+                            "val": 1050000,
+                            "form": "10-K",
+                            "accn": "A2",
+                        },
                         # Q3 discreto (92 giorni) — deve essere preferito nel dedup
-                        {"start": "2022-07-01", "end": "2022-09-30", "filed": "2022-11-01", "val": 300000, "form": "10-Q", "accn": "A3"},
+                        {
+                            "start": "2022-07-01",
+                            "end": "2022-09-30",
+                            "filed": "2022-11-01",
+                            "val": 300000,
+                            "form": "10-Q",
+                            "accn": "A3",
+                        },
                         # Q3 YTD (272 giorni) — stesso end, deve essere scartato a favore del discreto
-                        {"start": "2022-01-01", "end": "2022-09-30", "filed": "2022-11-01", "val": 900000, "form": "10-Q", "accn": "A4"},
+                        {
+                            "start": "2022-01-01",
+                            "end": "2022-09-30",
+                            "filed": "2022-11-01",
+                            "val": 900000,
+                            "form": "10-Q",
+                            "accn": "A4",
+                        },
                     ]
                 }
             },
             "EarningsPerShareBasic": {
                 "units": {
                     "shares": [
-                        {"start": "2022-01-01", "end": "2022-12-31", "filed": "2023-02-01", "val": 5.5, "form": "10-K", "accn": "B1"},
+                        {
+                            "start": "2022-01-01",
+                            "end": "2022-12-31",
+                            "filed": "2023-02-01",
+                            "val": 5.5,
+                            "form": "10-K",
+                            "accn": "B1",
+                        },
                     ]
                 }
             },
@@ -46,7 +80,17 @@ def facts_dir(tmp_path):
 
 def test_parse_company_returns_correct_columns(facts_dir):
     df = parse_company("0000320193", ["us-gaap:Revenues"], facts_dir, ["10-K", "10-Q"])
-    assert set(df.columns) == {"cik", "concept", "start", "end", "duration_days", "filed", "val", "form", "accn"}
+    assert set(df.columns) == {
+        "cik",
+        "concept",
+        "start",
+        "end",
+        "duration_days",
+        "filed",
+        "val",
+        "form",
+        "accn",
+    }
 
 
 def test_parse_company_pit_deduplication(facts_dir):
@@ -62,7 +106,7 @@ def test_parse_company_prefers_discrete_quarter_over_ytd(facts_dir):
     df = parse_company("0000320193", ["us-gaap:Revenues"], facts_dir, ["10-Q"])
     q3 = df[df["end"] == "2022-09-30"]
     assert len(q3) == 1
-    assert q3.iloc[0]["accn"] == "A3"       # discreto, non A4 (YTD)
+    assert q3.iloc[0]["accn"] == "A3"  # discreto, non A4 (YTD)
     assert q3.iloc[0]["duration_days"] == 91
 
 
@@ -85,7 +129,14 @@ def test_parse_company_concept_alias(tmp_path):
                 "RevenueFromContractWithCustomerExcludingAssessedTax": {
                     "units": {
                         "USD": [
-                            {"start": "2023-01-01", "end": "2023-12-31", "filed": "2024-02-01", "val": 500000000, "form": "10-K", "accn": "Z1"},
+                            {
+                                "start": "2023-01-01",
+                                "end": "2023-12-31",
+                                "filed": "2024-02-01",
+                                "val": 500000000,
+                                "form": "10-K",
+                                "accn": "Z1",
+                            },
                         ]
                     }
                 }
@@ -109,7 +160,14 @@ def test_parse_company_scale_correction(tmp_path):
                     "units": {
                         "USD": [
                             # Values in thousands: 500_000 = $500M reported as $500
-                            {"start": "2022-01-01", "end": "2022-12-31", "filed": "2023-02-01", "val": 500, "form": "10-K", "accn": "S1"},
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 500,
+                                "form": "10-K",
+                                "accn": "S1",
+                            },
                         ]
                     }
                 }
@@ -128,14 +186,32 @@ def test_parse_company_scale_correct_does_not_affect_shares(tmp_path):
         "facts": {
             "us-gaap": {
                 "Revenues": {
-                    "units": {"USD": [
-                        {"start": "2022-01-01", "end": "2022-12-31", "filed": "2023-02-01", "val": 400, "form": "10-K", "accn": "S2"},
-                    ]}
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 400,
+                                "form": "10-K",
+                                "accn": "S2",
+                            },
+                        ]
+                    }
                 },
                 "EarningsPerShareBasic": {
-                    "units": {"shares": [
-                        {"start": "2022-01-01", "end": "2022-12-31", "filed": "2023-02-01", "val": 2.5, "form": "10-K", "accn": "S3"},
-                    ]}
+                    "units": {
+                        "shares": [
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 2.5,
+                                "form": "10-K",
+                                "accn": "S3",
+                            },
+                        ]
+                    }
                 },
             }
         }
@@ -155,7 +231,14 @@ def test_parse_company_scale_no_correction_above_threshold(tmp_path):
                 "Revenues": {
                     "units": {
                         "USD": [
-                            {"start": "2022-01-01", "end": "2022-12-31", "filed": "2023-02-01", "val": 1_500_000, "form": "10-K", "accn": "T1"},
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 1_500_000,
+                                "form": "10-K",
+                                "accn": "T1",
+                            },
                         ]
                     }
                 }
@@ -175,14 +258,32 @@ def test_parse_company_canonical_wins_over_alias(tmp_path):
         "facts": {
             "us-gaap": {
                 "Revenues": {
-                    "units": {"USD": [
-                        {"start": "2023-01-01", "end": "2023-12-31", "filed": "2024-02-01", "val": 800_000_000, "form": "10-K", "accn": "C1"},
-                    ]}
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2023-01-01",
+                                "end": "2023-12-31",
+                                "filed": "2024-02-01",
+                                "val": 800_000_000,
+                                "form": "10-K",
+                                "accn": "C1",
+                            },
+                        ]
+                    }
                 },
                 "RevenueFromContractWithCustomerExcludingAssessedTax": {
-                    "units": {"USD": [
-                        {"start": "2023-01-01", "end": "2023-12-31", "filed": "2024-02-01", "val": 900_000_000, "form": "10-K", "accn": "C2"},
-                    ]}
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2023-01-01",
+                                "end": "2023-12-31",
+                                "filed": "2024-02-01",
+                                "val": 900_000_000,
+                                "form": "10-K",
+                                "accn": "C2",
+                            },
+                        ]
+                    }
                 },
             }
         }
@@ -202,10 +303,26 @@ def test_parse_company_restatements_preserve_filed_dates(tmp_path):
         "facts": {
             "us-gaap": {
                 "Revenues": {
-                    "units": {"USD": [
-                        {"start": "2022-01-01", "end": "2022-12-31", "filed": "2023-02-01", "val": 1_000_000_000, "form": "10-K", "accn": "R1"},
-                        {"start": "2022-01-01", "end": "2022-12-31", "filed": "2023-04-15", "val": 1_050_000_000, "form": "10-K", "accn": "R2"},
-                    ]}
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 1_000_000_000,
+                                "form": "10-K",
+                                "accn": "R1",
+                            },
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-04-15",
+                                "val": 1_050_000_000,
+                                "form": "10-K",
+                                "accn": "R2",
+                            },
+                        ]
+                    }
                 }
             }
         }
@@ -224,12 +341,34 @@ def test_parse_company_drops_unchanged_comparative_filings(tmp_path):
     """Later re-filings of the same unchanged value (comparative periods in
     subsequent 10-Ks) must be dropped to preserve PIT accuracy."""
     facts = {
-        "facts": {"us-gaap": {"Revenues": {"units": {"USD": [
-            # Original FY2022 10-K (filed Feb 2023)
-            {"start": "2022-01-01", "end": "2022-12-31", "filed": "2023-02-01", "val": 1_000_000_000, "form": "10-K", "accn": "P1"},
-            # Same period/value re-filed 2 years later as comparative in FY2024 10-K
-            {"start": "2022-01-01", "end": "2022-12-31", "filed": "2025-02-01", "val": 1_000_000_000, "form": "10-K", "accn": "P2"},
-        ]}}}}
+        "facts": {
+            "us-gaap": {
+                "Revenues": {
+                    "units": {
+                        "USD": [
+                            # Original FY2022 10-K (filed Feb 2023)
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 1_000_000_000,
+                                "form": "10-K",
+                                "accn": "P1",
+                            },
+                            # Same period/value re-filed 2 years later as comparative in FY2024 10-K
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2025-02-01",
+                                "val": 1_000_000_000,
+                                "form": "10-K",
+                                "accn": "P2",
+                            },
+                        ]
+                    }
+                }
+            }
+        }
     }
     cik = "0000000007"
     (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
@@ -243,10 +382,32 @@ def test_parse_company_drops_unchanged_comparative_filings(tmp_path):
 def test_parse_company_restated_value_preserved_after_dedup(tmp_path):
     """A genuine restatement (changed value) must be kept even after cross-filing dedup."""
     facts = {
-        "facts": {"us-gaap": {"Revenues": {"units": {"USD": [
-            {"start": "2022-01-01", "end": "2022-12-31", "filed": "2023-02-01", "val": 1_000_000_000, "form": "10-K", "accn": "R1"},
-            {"start": "2022-01-01", "end": "2022-12-31", "filed": "2023-04-01", "val": 1_050_000_000, "form": "10-K", "accn": "R2"},
-        ]}}}}
+        "facts": {
+            "us-gaap": {
+                "Revenues": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 1_000_000_000,
+                                "form": "10-K",
+                                "accn": "R1",
+                            },
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-04-01",
+                                "val": 1_050_000_000,
+                                "form": "10-K",
+                                "accn": "R2",
+                            },
+                        ]
+                    }
+                }
+            }
+        }
     }
     cik = "0000000008"
     (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
@@ -326,7 +487,8 @@ def test_parse_all_force_reparses(tmp_path):
     # Create the parquet first.
     parse_all(config, cik_map)
 
-    from unittest.mock import patch, call
+    from unittest.mock import patch
+
     import pitedgar.parser as parser_mod
 
     with patch.object(parser_mod, "parse_company", wraps=parser_mod.parse_company) as mock_pc:

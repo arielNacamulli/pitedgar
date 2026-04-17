@@ -1,7 +1,5 @@
 """Tests for query.py"""
 
-from pathlib import Path
-
 import pandas as pd
 import pytest
 
@@ -13,10 +11,42 @@ CONCEPT = "us-gaap:Revenues"
 @pytest.fixture
 def parquet_path(tmp_path):
     records = [
-        {"ticker": "AAPL", "concept": CONCEPT, "end": "2021-12-31", "filed": "2022-01-28", "val": 365817000000.0, "form": "10-K", "accn": "A1"},
-        {"ticker": "AAPL", "concept": CONCEPT, "end": "2022-12-31", "filed": "2023-02-02", "val": 394328000000.0, "form": "10-K", "accn": "A2"},
-        {"ticker": "AAPL", "concept": CONCEPT, "end": "2022-06-25", "filed": "2022-07-29", "val": 82959000000.0,  "form": "10-Q", "accn": "A3"},
-        {"ticker": "MSFT", "concept": CONCEPT, "end": "2022-06-30", "filed": "2022-07-28", "val": 198270000000.0, "form": "10-K", "accn": "B1"},
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2021-12-31",
+            "filed": "2022-01-28",
+            "val": 365817000000.0,
+            "form": "10-K",
+            "accn": "A1",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2022-12-31",
+            "filed": "2023-02-02",
+            "val": 394328000000.0,
+            "form": "10-K",
+            "accn": "A2",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2022-06-25",
+            "filed": "2022-07-29",
+            "val": 82959000000.0,
+            "form": "10-Q",
+            "accn": "A3",
+        },
+        {
+            "ticker": "MSFT",
+            "concept": CONCEPT,
+            "end": "2022-06-30",
+            "filed": "2022-07-28",
+            "val": 198270000000.0,
+            "form": "10-K",
+            "accn": "B1",
+        },
     ]
     df = pd.DataFrame(records)
     path = tmp_path / "pit_financials.parquet"
@@ -102,10 +132,42 @@ def test_cross_section_multiple_dates(parquet_path):
 def ttm_parquet_path(tmp_path):
     """Four discrete quarters for AAPL so TTM = their sum."""
     records = [
-        {"ticker": "AAPL", "concept": CONCEPT, "end": "2022-03-26", "filed": "2022-04-28", "val": 97278000000.0,  "form": "10-Q", "accn": "Q1"},
-        {"ticker": "AAPL", "concept": CONCEPT, "end": "2022-06-25", "filed": "2022-07-28", "val": 82959000000.0,  "form": "10-Q", "accn": "Q2"},
-        {"ticker": "AAPL", "concept": CONCEPT, "end": "2022-09-24", "filed": "2022-10-28", "val": 90146000000.0,  "form": "10-Q", "accn": "Q3"},
-        {"ticker": "AAPL", "concept": CONCEPT, "end": "2022-12-31", "filed": "2023-02-02", "val": 117154000000.0, "form": "10-Q", "accn": "Q4"},
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2022-03-26",
+            "filed": "2022-04-28",
+            "val": 97278000000.0,
+            "form": "10-Q",
+            "accn": "Q1",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2022-06-25",
+            "filed": "2022-07-28",
+            "val": 82959000000.0,
+            "form": "10-Q",
+            "accn": "Q2",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2022-09-24",
+            "filed": "2022-10-28",
+            "val": 90146000000.0,
+            "form": "10-Q",
+            "accn": "Q3",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2022-12-31",
+            "filed": "2023-02-02",
+            "val": 117154000000.0,
+            "form": "10-Q",
+            "accn": "Q4",
+        },
     ]
     df = pd.DataFrame(records)
     path = tmp_path / "pit_financials.parquet"
@@ -117,11 +179,35 @@ def test_as_of_restatement_pit_correctness(tmp_path):
     """Before a restatement is filed, as_of returns the original value; after, the restated value."""
     records = [
         # Q1 original
-        {"ticker": "AAPL", "concept": CONCEPT, "end": "2023-03-31", "filed": "2023-04-28", "val": 100.0, "form": "10-Q", "accn": "R1"},
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-03-31",
+            "filed": "2023-04-28",
+            "val": 100.0,
+            "form": "10-Q",
+            "accn": "R1",
+        },
         # Q2 filed
-        {"ticker": "AAPL", "concept": CONCEPT, "end": "2023-06-30", "filed": "2023-07-28", "val": 200.0, "form": "10-Q", "accn": "R2"},
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-06-30",
+            "filed": "2023-07-28",
+            "val": 200.0,
+            "form": "10-Q",
+            "accn": "R2",
+        },
         # Q1 restated (filed after Q2!)
-        {"ticker": "AAPL", "concept": CONCEPT, "end": "2023-03-31", "filed": "2023-08-15", "val": 110.0, "form": "10-Q", "accn": "R3"},
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-03-31",
+            "filed": "2023-08-15",
+            "val": 110.0,
+            "form": "10-Q",
+            "accn": "R3",
+        },
     ]
     df = pd.DataFrame(records)
     path = tmp_path / "pit_financials.parquet"
@@ -178,7 +264,7 @@ def test_ttm_cross_section_multiple_dates(ttm_parquet_path):
     assert len(result) == 2
     early = result[result["as_of_date"] == pd.Timestamp("2022-08-01")].iloc[0]
     late = result[result["as_of_date"] == pd.Timestamp("2023-06-01")].iloc[0]
-    assert pd.isna(early["ttm_val"])   # only 2 quarters available → below min_periods=4
+    assert pd.isna(early["ttm_val"])  # only 2 quarters available → below min_periods=4
     assert not pd.isna(late["ttm_val"])
 
 
@@ -209,16 +295,57 @@ def test_ttm_start_date_filter(ttm_parquet_path):
 # TTM restatement correctness
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def restatement_parquet_path(tmp_path):
     """4 quarters + a Q1 restatement filed after Q4."""
     records = [
-        {"ticker": "AAPL", "concept": CONCEPT, "end": "2022-03-31", "filed": "2022-04-28", "val": 100.0, "form": "10-Q", "accn": "Q1"},
-        {"ticker": "AAPL", "concept": CONCEPT, "end": "2022-06-30", "filed": "2022-07-28", "val": 200.0, "form": "10-Q", "accn": "Q2"},
-        {"ticker": "AAPL", "concept": CONCEPT, "end": "2022-09-30", "filed": "2022-10-28", "val": 300.0, "form": "10-Q", "accn": "Q3"},
-        {"ticker": "AAPL", "concept": CONCEPT, "end": "2022-12-31", "filed": "2023-02-02", "val": 400.0, "form": "10-Q", "accn": "Q4"},
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2022-03-31",
+            "filed": "2022-04-28",
+            "val": 100.0,
+            "form": "10-Q",
+            "accn": "Q1",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2022-06-30",
+            "filed": "2022-07-28",
+            "val": 200.0,
+            "form": "10-Q",
+            "accn": "Q2",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2022-09-30",
+            "filed": "2022-10-28",
+            "val": 300.0,
+            "form": "10-Q",
+            "accn": "Q3",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2022-12-31",
+            "filed": "2023-02-02",
+            "val": 400.0,
+            "form": "10-Q",
+            "accn": "Q4",
+        },
         # Q1 restated after Q4 is filed
-        {"ticker": "AAPL", "concept": CONCEPT, "end": "2022-03-31", "filed": "2023-03-01", "val": 110.0, "form": "10-Q", "accn": "Q1R"},
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2022-03-31",
+            "filed": "2023-03-01",
+            "val": 110.0,
+            "form": "10-Q",
+            "accn": "Q1R",
+        },
     ]
     df = pd.DataFrame(records)
     path = tmp_path / "pit_financials.parquet"
@@ -265,6 +392,7 @@ def test_ttm_cross_section_staleness(restatement_parquet_path):
 # cross_section correctness
 # ---------------------------------------------------------------------------
 
+
 def test_cross_section_no_lookahead(parquet_path):
     """Values filed after as_of_date must not appear."""
     q = PitQuery(parquet_path)
@@ -304,6 +432,7 @@ def test_cross_section_missing_ticker(parquet_path):
 # Q4-from-10-K derivation
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def dec_fy_parquet_path(tmp_path):
     """December-FY company: Q1/Q2/Q3 as 10-Qs, Q4 only in 10-K annual.
@@ -315,13 +444,45 @@ def dec_fy_parquet_path(tmp_path):
     """
     records = [
         # Q1 2025
-        {"ticker": "TSLA", "concept": CONCEPT, "end": "2025-03-31", "filed": "2025-05-05", "val": 100.0, "form": "10-Q", "accn": "K1"},
+        {
+            "ticker": "TSLA",
+            "concept": CONCEPT,
+            "end": "2025-03-31",
+            "filed": "2025-05-05",
+            "val": 100.0,
+            "form": "10-Q",
+            "accn": "K1",
+        },
         # Q2 2025
-        {"ticker": "TSLA", "concept": CONCEPT, "end": "2025-06-30", "filed": "2025-08-05", "val": 200.0, "form": "10-Q", "accn": "K2"},
+        {
+            "ticker": "TSLA",
+            "concept": CONCEPT,
+            "end": "2025-06-30",
+            "filed": "2025-08-05",
+            "val": 200.0,
+            "form": "10-Q",
+            "accn": "K2",
+        },
         # Q3 2025 — last 10-Q, filed ~135 days before 2026-03-28
-        {"ticker": "TSLA", "concept": CONCEPT, "end": "2025-09-30", "filed": "2025-11-10", "val": 300.0, "form": "10-Q", "accn": "K3"},
+        {
+            "ticker": "TSLA",
+            "concept": CONCEPT,
+            "end": "2025-09-30",
+            "filed": "2025-11-10",
+            "val": 300.0,
+            "form": "10-Q",
+            "accn": "K3",
+        },
         # FY2025 10-K — annual = Q1+Q2+Q3+Q4 = 1000; filed 2026-02-05 (~51 days ago)
-        {"ticker": "TSLA", "concept": CONCEPT, "end": "2025-12-31", "filed": "2026-02-05", "val": 1000.0, "form": "10-K", "accn": "K4"},
+        {
+            "ticker": "TSLA",
+            "concept": CONCEPT,
+            "end": "2025-12-31",
+            "filed": "2026-02-05",
+            "val": 1000.0,
+            "form": "10-K",
+            "accn": "K4",
+        },
     ]
     df = pd.DataFrame(records)
     path = tmp_path / "pit_financials.parquet"
@@ -364,10 +525,34 @@ def test_ttm_cross_section_before_10k_filed_still_stale(dec_fy_parquet_path):
 def test_ttm_q4_not_injected_when_fewer_than_3_quarters(tmp_path):
     """If only Q1+Q2 exist for a fiscal year, Q4 is NOT synthesised (would absorb Q3 too)."""
     records = [
-        {"ticker": "TSLA", "concept": CONCEPT, "end": "2025-03-31", "filed": "2025-05-05", "val": 100.0, "form": "10-Q", "accn": "K1"},
-        {"ticker": "TSLA", "concept": CONCEPT, "end": "2025-06-30", "filed": "2025-08-05", "val": 200.0, "form": "10-Q", "accn": "K2"},
+        {
+            "ticker": "TSLA",
+            "concept": CONCEPT,
+            "end": "2025-03-31",
+            "filed": "2025-05-05",
+            "val": 100.0,
+            "form": "10-Q",
+            "accn": "K1",
+        },
+        {
+            "ticker": "TSLA",
+            "concept": CONCEPT,
+            "end": "2025-06-30",
+            "filed": "2025-08-05",
+            "val": 200.0,
+            "form": "10-Q",
+            "accn": "K2",
+        },
         # No Q3 10-Q
-        {"ticker": "TSLA", "concept": CONCEPT, "end": "2025-12-31", "filed": "2026-02-05", "val": 1000.0, "form": "10-K", "accn": "K4"},
+        {
+            "ticker": "TSLA",
+            "concept": CONCEPT,
+            "end": "2025-12-31",
+            "filed": "2026-02-05",
+            "val": 1000.0,
+            "form": "10-K",
+            "accn": "K4",
+        },
     ]
     df = pd.DataFrame(records)
     path = tmp_path / "pit_financials.parquet"
@@ -392,10 +577,46 @@ def test_ttm_uses_quarterly_data_from_10k_filings(tmp_path):
     NetIncomeLoss as comparative data inside annual 10-K filings."""
     records = [
         # All 4 quarters appear as form='10-K' with quarterly duration
-        {"ticker": "JNJ", "concept": CONCEPT, "end": "2022-03-31", "filed": "2023-02-15", "val": 100.0, "form": "10-K", "accn": "J1", "duration_days": 90},
-        {"ticker": "JNJ", "concept": CONCEPT, "end": "2022-06-30", "filed": "2023-02-15", "val": 200.0, "form": "10-K", "accn": "J2", "duration_days": 91},
-        {"ticker": "JNJ", "concept": CONCEPT, "end": "2022-09-30", "filed": "2023-02-15", "val": 300.0, "form": "10-K", "accn": "J3", "duration_days": 91},
-        {"ticker": "JNJ", "concept": CONCEPT, "end": "2022-12-31", "filed": "2023-02-15", "val": 400.0, "form": "10-K", "accn": "J4", "duration_days": 92},
+        {
+            "ticker": "JNJ",
+            "concept": CONCEPT,
+            "end": "2022-03-31",
+            "filed": "2023-02-15",
+            "val": 100.0,
+            "form": "10-K",
+            "accn": "J1",
+            "duration_days": 90,
+        },
+        {
+            "ticker": "JNJ",
+            "concept": CONCEPT,
+            "end": "2022-06-30",
+            "filed": "2023-02-15",
+            "val": 200.0,
+            "form": "10-K",
+            "accn": "J2",
+            "duration_days": 91,
+        },
+        {
+            "ticker": "JNJ",
+            "concept": CONCEPT,
+            "end": "2022-09-30",
+            "filed": "2023-02-15",
+            "val": 300.0,
+            "form": "10-K",
+            "accn": "J3",
+            "duration_days": 91,
+        },
+        {
+            "ticker": "JNJ",
+            "concept": CONCEPT,
+            "end": "2022-12-31",
+            "filed": "2023-02-15",
+            "val": 400.0,
+            "form": "10-K",
+            "accn": "J4",
+            "duration_days": 92,
+        },
     ]
     df = pd.DataFrame(records)
     path = tmp_path / "pit_financials.parquet"
@@ -411,10 +632,46 @@ def test_ttm_uses_quarterly_data_from_10k_filings(tmp_path):
 def test_ttm_cross_section_quarterly_data_from_10k(tmp_path):
     """ttm_cross_section must also pick up quarterly data from 10-K filings."""
     records = [
-        {"ticker": "JNJ", "concept": CONCEPT, "end": "2022-03-31", "filed": "2023-02-15", "val": 100.0, "form": "10-K", "accn": "J1", "duration_days": 90},
-        {"ticker": "JNJ", "concept": CONCEPT, "end": "2022-06-30", "filed": "2023-02-15", "val": 200.0, "form": "10-K", "accn": "J2", "duration_days": 91},
-        {"ticker": "JNJ", "concept": CONCEPT, "end": "2022-09-30", "filed": "2023-02-15", "val": 300.0, "form": "10-K", "accn": "J3", "duration_days": 91},
-        {"ticker": "JNJ", "concept": CONCEPT, "end": "2022-12-31", "filed": "2023-02-15", "val": 400.0, "form": "10-K", "accn": "J4", "duration_days": 92},
+        {
+            "ticker": "JNJ",
+            "concept": CONCEPT,
+            "end": "2022-03-31",
+            "filed": "2023-02-15",
+            "val": 100.0,
+            "form": "10-K",
+            "accn": "J1",
+            "duration_days": 90,
+        },
+        {
+            "ticker": "JNJ",
+            "concept": CONCEPT,
+            "end": "2022-06-30",
+            "filed": "2023-02-15",
+            "val": 200.0,
+            "form": "10-K",
+            "accn": "J2",
+            "duration_days": 91,
+        },
+        {
+            "ticker": "JNJ",
+            "concept": CONCEPT,
+            "end": "2022-09-30",
+            "filed": "2023-02-15",
+            "val": 300.0,
+            "form": "10-K",
+            "accn": "J3",
+            "duration_days": 91,
+        },
+        {
+            "ticker": "JNJ",
+            "concept": CONCEPT,
+            "end": "2022-12-31",
+            "filed": "2023-02-15",
+            "val": 400.0,
+            "form": "10-K",
+            "accn": "J4",
+            "duration_days": 92,
+        },
     ]
     df = pd.DataFrame(records)
     path = tmp_path / "pit_financials.parquet"
@@ -429,9 +686,33 @@ def test_ttm_cross_section_quarterly_data_from_10k(tmp_path):
 def test_history_returns_latest_filed_per_end(tmp_path):
     """history() must return the restated (latest-filed) value for each period end."""
     records = [
-        {"ticker": "AAPL", "concept": CONCEPT, "end": "2023-03-31", "filed": "2023-04-28", "val": 50.0,  "form": "10-Q", "accn": "H1"},
-        {"ticker": "AAPL", "concept": CONCEPT, "end": "2023-03-31", "filed": "2023-06-01", "val": 55.0,  "form": "10-Q", "accn": "H2"},
-        {"ticker": "AAPL", "concept": CONCEPT, "end": "2023-06-30", "filed": "2023-07-28", "val": 60.0,  "form": "10-Q", "accn": "H3"},
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-03-31",
+            "filed": "2023-04-28",
+            "val": 50.0,
+            "form": "10-Q",
+            "accn": "H1",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-03-31",
+            "filed": "2023-06-01",
+            "val": 55.0,
+            "form": "10-Q",
+            "accn": "H2",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-06-30",
+            "filed": "2023-07-28",
+            "val": 60.0,
+            "form": "10-Q",
+            "accn": "H3",
+        },
     ]
     df = pd.DataFrame(records)
     path = tmp_path / "pit_financials.parquet"

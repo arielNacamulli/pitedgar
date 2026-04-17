@@ -1,6 +1,7 @@
 """Configuration for pitedgar via Pydantic BaseModel."""
 
 from pathlib import Path
+
 from pydantic import BaseModel, model_validator
 
 DEFAULT_CONCEPTS = [
@@ -35,7 +36,7 @@ BULK_ZIP_URL = "https://www.sec.gov/Archives/edgar/daily-index/xbrl/companyfacts
 class PitEdgarConfig(BaseModel):
     edgar_identity: str
     data_dir: Path
-    facts_dir: Path | None = None
+    facts_dir: Path = None  # type: ignore[assignment]
     zip_url: str = BULK_ZIP_URL
     concepts: list[str] = DEFAULT_CONCEPTS
     forms: list[str] = DEFAULT_FORMS
@@ -46,6 +47,12 @@ class PitEdgarConfig(BaseModel):
     def set_facts_dir(self) -> "PitEdgarConfig":
         if self.facts_dir is None:
             self.facts_dir = self.data_dir / "companyfacts"
+        return self
+
+    @model_validator(mode="after")
+    def validate_edgar_identity(self) -> "PitEdgarConfig":
+        if not self.edgar_identity or not self.edgar_identity.strip():
+            raise ValueError("edgar_identity must be a non-empty SEC User-Agent string")
         return self
 
     def ensure_dirs(self) -> None:
