@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-04-18
+
+### Added
+- **QA tooling baseline**: ruff (lint + format), mypy with pandas-stubs, pre-commit hooks, and a coverage gate (>= 90%) enforced in CI.
+- **`scale_corrected` column** in the parser output: marks rows where the 1000x thousands-to-dollars rescale fired, making the correction auditable downstream.
+- **CLI, downloader-error, and end-to-end integration tests**: coverage raised from 85% to 94% (cli.py was previously excluded entirely).
+
+### Fixed
+- **`__version__` drift**: `pitedgar.__version__` is now read from package metadata instead of a hardcoded literal that had fallen behind `pyproject.toml`.
+- **CLI tracebacks on missing inputs**: `pitedgar build` and `pitedgar query` now emit a ClickException pointing users at the prior pipeline step instead of a raw `FileNotFoundError`. `--as-of` is validated up-front and unreadable/empty tickers files are rejected early.
+- **Downloader atomicity and resilience**: the 1.5 GB bulk ZIP is now streamed to a `.part` sidecar and atomically renamed; transient `ConnectionError`/`Timeout`/`ChunkedEncodingError` are retried with exponential backoff; a corrupt ZIP on disk is deleted with a clear error so the next run re-fetches.
+- **Atomic parquet writes** in `mapping.py` and `parser.py`: a crash mid-write no longer leaves a truncated parquet that later reads would choke on.
+- **Narrowed `build_cik_map` exception handling**: only `ValueError`/`KeyError`/`LookupError`/`AttributeError` are treated as unresolvable-ticker skips; genuine network or auth failures now propagate.
+
 ## [0.2.3] - 2026-04-12
 
 ### Fixed
