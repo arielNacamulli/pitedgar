@@ -562,15 +562,15 @@ def test_parse_all_force_reparses(tmp_path):
     )
     cik_map = pd.DataFrame({"cik": [cik]}, index=pd.Index(["AAPL"], name="ticker"))
 
-    # Create the parquet first.
-    parse_all(config, cik_map)
+    # Create the parquet first. Use n_workers=1 to keep mock-based assertions simple.
+    parse_all(config, cik_map, n_workers=1)
 
     from unittest.mock import patch
 
     import pitedgar.parser as parser_mod
 
     with patch.object(parser_mod, "parse_company", wraps=parser_mod.parse_company) as mock_pc:
-        parse_all(config, cik_map, force=True)
+        parse_all(config, cik_map, force=True, n_workers=1)
         assert mock_pc.call_count >= 1
 
 
@@ -616,3 +616,106 @@ def test_parse_company_keeps_10ka_alongside_10k(tmp_path):
     assert set(df["form"]) == {"10-K", "10-K/A"}
     assert set(df["accn"]) == {"ORIG", "AMEND"}
     assert set(df["val"]) == {1_000_000_000.0, 1_120_000_000.0}
+
+
+def _write_multi_company_facts(facts_dir):
+    """Create a small multi-company facts directory for parallel-equivalence tests."""
+    companies = {
+        "0000000101": ("AAA", 100_000_000, "M1"),
+        "0000000102": ("BBB", 250_000_000, "M2"),
+        "0000000103": ("CCC", 500_000_000, "M3"),
+        "0000000104": ("DDD", 750_000_000, "M4"),
+    }
+    for cik, (_ticker, val, accn) in companies.items():
+        facts = {
+            "facts": {
+                "us-gaap": {
+                    "Revenues": {
+                        "units": {
+                            "USD": [
+                                {
+                                    "start": "2022-01-01",
+                                    "end": "2022-12-31",
+                                    "filed": "2023-02-01",
+                                    "val": val,
+                                    "form": "10-K",
+                                    "accn": accn,
+                                },
+                            ]
+                        }
+                    }
+                }
+            }
+        }
+        (facts_dir / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+    cik_map = pd.DataFrame(
+        {"cik": list(companies)},
+        index=pd.Index([t for _c, (t, _v, _a) in companies.items()], name="ticker"),
+    )
+    return cik_map
+
+
+@pytest.mark.parametrize("n_workers", [1, 2])
+def test_parse_all_parallel_equivalence(tmp_path, n_workers):
+    """parse_all with n_workers > 1 must produce identical output to the serial path."""
+    facts_dir = tmp_path / "companyfacts"
+    facts_dir.mkdir()
+    cik_map = _write_multi_company_facts(facts_dir)
+
+    # Each call uses its own data_dir so the cached parquet doesn't short-circuit.
+    serial_dir = tmp_path / "serial"
+    serial_dir.mkdir()
+    parallel_dir = tmp_path / "parallel"
+    parallel_dir.mkdir()
+
+    serial_cfg = PitEdgarConfig(
+        edgar_identity="Test test@example.com",
+        data_dir=serial_dir,
+        facts_dir=facts_dir,
+    )
+    parallel_cfg = PitEdgarConfig(
+        edgar_identity="Test test@example.com",
+        data_dir=parallel_dir,
+        facts_dir=facts_dir,
+    )
+
+    serial = parse_all(serial_cfg, cik_map, n_workers=1)
+    parallel = parse_all(parallel_cfg, cik_map, n_workers=n_workers)
+
+    # Order of returned rows is not guaranteed across workers — sort before comparing.
+    sort_cols = ["ticker", "concept", "end", "filed"]
+    serial_sorted = serial.sort_values(sort_cols).reset_index(drop=True)
+    parallel_sorted = parallel.sort_values(sort_cols).reset_index(drop=True)
+
+    pd.testing.assert_frame_equal(serial_sorted, parallel_sorted)
+    assert set(parallel_sorted["ticker"]) == {"AAA", "BBB", "CCC", "DDD"}
+
+
+def test_parse_all_n_workers_default_uses_cpu_count(tmp_path):
+    """n_workers=None should default to os.cpu_count() (or 1) — verify it runs without error."""
+    facts_dir = tmp_path / "companyfacts"
+    facts_dir.mkdir()
+    cik_map = _write_multi_company_facts(facts_dir)
+
+    config = PitEdgarConfig(
+        edgar_identity="Test test@example.com",
+        data_dir=tmp_path,
+        facts_dir=facts_dir,
+    )
+    master = parse_all(config, cik_map)  # n_workers=None
+    assert set(master["ticker"]) == {"AAA", "BBB", "CCC", "DDD"}
+
+
+def test_parse_all_invalid_n_workers(tmp_path):
+    """n_workers < 1 must raise ValueError."""
+    facts_dir = tmp_path / "companyfacts"
+    facts_dir.mkdir()
+    cik_map = _write_multi_company_facts(facts_dir)
+
+    config = PitEdgarConfig(
+        edgar_identity="Test test@example.com",
+        data_dir=tmp_path,
+        facts_dir=facts_dir,
+    )
+    with pytest.raises(ValueError, match="n_workers"):
+        parse_all(config, cik_map, n_workers=0)
