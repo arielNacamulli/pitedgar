@@ -55,7 +55,13 @@ CONCEPT_ALIASES: dict[str, str] = {
     "us-gaap:OperatingCashFlow": "us-gaap:NetCashProvidedByUsedInOperatingActivities",
 }
 
-DEFAULT_FORMS = ["10-K", "10-Q"]
+# Amendments (10-K/A, 10-Q/A) carry corrected — and often substantially restated —
+# data; they are typically filed weeks or months after the original. Foreign private
+# issuers file annual reports on Form 20-F (and amendments on 20-F/A). We include all
+# of these by default so the parquet captures the full universe of filings; the
+# parser's PIT dedup keeps the correct row because `(concept, end)` dedup retains the
+# latest distinct value (i.e. an amendment supersedes the original from its filed date).
+DEFAULT_FORMS = ["10-K", "10-K/A", "10-Q", "10-Q/A", "20-F", "20-F/A"]
 BULK_ZIP_URL = "https://www.sec.gov/Archives/edgar/daily-index/xbrl/companyfacts.zip"
 
 
