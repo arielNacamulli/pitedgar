@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "pitedgar"
-version = "0.2.4"
+version = "0.2.6"
 description = "Point-in-time SEC EDGAR financial data pipeline"
 authors = ["Ariel Nacamulli"]
 license = "MIT"

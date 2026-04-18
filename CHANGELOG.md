@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-04-18
+
+### Added
+- **Expanded `CONCEPT_ALIASES`** for revenue, net income, cash, and long-term debt families. Companies that file under deprecated or variant XBRL tags (e.g. `SalesRevenueNet`, `RevenueFromContractWithCustomerIncludingAssessedTax`, `Cash`, `CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents`, `LongTermDebtNoncurrent`, `ProfitLoss`) now appear in the parquet under the canonical concept, eliminating coverage gaps for filers that never used the canonical tag. The canonical-first lookup in `parse_company` ensures the canonical value always wins when both tags are present, so existing parquets are unaffected for those filers — only previously-empty rows are filled in. Rebuild with `pitedgar build --force` to backfill historical coverage.
+- **Tests**: alias-only filers now resolve under the canonical concept; canonical-vs-alias precedence is verified for every newly added family.
+
 ## [0.2.4] - 2026-04-18
 
 ### Added
