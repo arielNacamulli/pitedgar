@@ -29,7 +29,7 @@ def _preferred_units(concept_short: str) -> list[str]:
 
 def parse_company(
     cik_padded: str,
-    concepts: list[str],
+    concepts: list[str] | None,
     facts_dir: Path,
     forms: list[str],
 ) -> pd.DataFrame:
@@ -37,12 +37,17 @@ def parse_company(
 
     Args:
         cik_padded: zero-padded 10-digit CIK string.
-        concepts:   list of "us-gaap:ConceptName" strings.
+        concepts:   list of "us-gaap:ConceptName" strings to extract. Pass ``None``
+                    or an empty list to extract every us-gaap concept present in
+                    the JSON (recommended — the full parquet supports flexible
+                    quant signal iteration without re-parsing the 1.5 GB cache).
         facts_dir:  directory containing CIK*.json files.
         forms:      filing forms to keep, e.g. ["10-K", "10-Q"].
 
     Returns:
-        DataFrame with columns: cik, concept, end, filed, val, form, accn
+        DataFrame with columns: cik, concept, end, filed, val, form, accn.
+        The ``concept`` column always contains the canonical full name
+        ``"us-gaap:<Name>"`` — alias tags are mapped to their canonical target.
     """
     json_path = facts_dir / f"CIK{cik_padded}.json"
     if not json_path.exists():
@@ -55,6 +60,18 @@ def parse_company(
     usgaap = data.get("facts", {}).get("us-gaap", {})
     if not usgaap:
         return pd.DataFrame()
+
+    # When ``concepts`` is None or empty, derive the canonical concept set from
+    # whatever us-gaap tags this company actually filed. Aliases are mapped to
+    # their canonical name so e.g. a filer that only reports the post-ASC 606
+    # revenue tag still ends up under ``us-gaap:Revenues`` in the parquet.
+    if not concepts:
+        canonical_set: set[str] = set()
+        for short_name in usgaap:
+            full_name = f"us-gaap:{short_name}"
+            canonical = CONCEPT_ALIASES.get(full_name, full_name)
+            canonical_set.add(canonical)
+        concepts = sorted(canonical_set)
 
     rows: list[dict] = []
 
@@ -85,6 +102,8 @@ def parse_company(
                 break
 
         if not unit_entries:
+            # Concept reported neither USD nor shares (e.g. pure/EUR/etc.) — skip
+            # silently to keep the parquet schema homogeneous.
             continue
 
         for entry in unit_entries:
