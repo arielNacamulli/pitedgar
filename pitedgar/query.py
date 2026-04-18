@@ -152,7 +152,7 @@ class PitQuery:
         tickers: list[str] | str,
         concept: str,
         as_of_date: str | pd.Timestamp,
-        max_staleness_days: int = 100,
+        max_staleness_days: int | None = None,
     ) -> pd.DataFrame:
         """Last known value of a concept for one or a few tickers at a single date.
 
@@ -162,8 +162,13 @@ class PitQuery:
         significantly faster due to vectorized merge_asof with a single pre-filter pass.
 
         Only filings with filed <= as_of_date are considered (no look-ahead bias).
-        Values whose most recent filing predates as_of_date by more than
-        max_staleness_days are returned as NaN.
+        The result always includes an ``age_days`` column (as_of_date − filed in
+        days) so callers can decide what to do with stale values themselves. When
+        ``max_staleness_days`` is set to an int, values whose most recent filing
+        predates ``as_of_date`` by more than that many days are nullified.
+
+        v0.2.x changed the default from 100 to None to surface signal; pass an
+        int to restore the previous behavior.
 
         Args:
             tickers:            one ticker string or a list of ticker strings.
@@ -171,13 +176,14 @@ class PitQuery:
             as_of_date:         the observation date (ISO string or Timestamp).
             max_staleness_days: maximum age (in days) of the last filing before
                                 the value is considered stale and set to NaN.
+                                Default ``None`` keeps every value; ``age_days``
+                                is always returned regardless.
 
-        Returns DataFrame with columns: ticker, val, filed, end, form
+        Returns DataFrame with columns: ticker, val, filed, end, form, age_days
         """
         if isinstance(tickers, str):
             tickers = [tickers]
         as_of_ts = pd.Timestamp(as_of_date)
-        cutoff = as_of_ts - pd.Timedelta(days=max_staleness_days)
 
         mask = (
             self.data["ticker"].isin(tickers)
@@ -197,19 +203,30 @@ class PitQuery:
         idx = sub.groupby("ticker")["end"].idxmax()
         result = sub.loc[idx, ["ticker", "val", "filed", "end", "form"]].copy()
 
-        # Nullify stale values
-        stale = result["filed"] < cutoff
-        result.loc[stale, "val"] = float("nan")
+        # Always surface age_days so callers can decide what to do with stale rows.
+        result["age_days"] = (as_of_ts - result["filed"]).dt.days.astype("Int64")
+
+        # Only nullify when the caller opts in by passing an int.
+        if max_staleness_days is not None:
+            stale = result["age_days"] > max_staleness_days
+            result.loc[stale, "val"] = float("nan")
 
         # Add tickers with no data at all
         missing = set(tickers) - set(result["ticker"])
         if missing:
             filler = pd.DataFrame(
-                {"ticker": list(missing), "val": float("nan"), "filed": pd.NaT, "end": pd.NaT, "form": None}
+                {
+                    "ticker": list(missing),
+                    "val": float("nan"),
+                    "filed": pd.NaT,
+                    "end": pd.NaT,
+                    "form": None,
+                    "age_days": pd.array([pd.NA] * len(missing), dtype="Int64"),
+                }
             )
             result = pd.concat([result, filler], ignore_index=True)
 
-        return result.reset_index(drop=True)
+        return result[["ticker", "val", "filed", "end", "form", "age_days"]].reset_index(drop=True)
 
     def history(
         self,
@@ -308,7 +325,7 @@ class PitQuery:
         as_of_dates: str | list[str] | pd.DatetimeIndex,
         tickers: list[str] | None = None,
         min_periods: int = 4,
-        max_staleness_days: int = 100,
+        max_staleness_days: int | None = None,
     ) -> pd.DataFrame:
         """Trailing-twelve-month values for a full universe across one or more dates.
 
@@ -327,6 +344,14 @@ class PitQuery:
         - Computes TTM step-functions for all tickers in one grouped O(n log n) pass
         - Resolves all as_of_dates in a single vectorized merge_asof (no per-date loop)
 
+        The result always includes an ``age_days`` column (as_of_date − filed in
+        days) so callers can decide what to do with stale values themselves. When
+        ``max_staleness_days`` is set to an int, TTM values whose underlying
+        filing is older than that many days are nullified.
+
+        v0.2.x changed the default from 100 to None to surface signal; pass an
+        int to restore the previous behavior.
+
         Args:
             concept:            XBRL concept, e.g. "us-gaap:Revenues".
             as_of_dates:        one date string or a list/DatetimeIndex of dates.
@@ -336,8 +361,11 @@ class PitQuery:
                                 less than one year of quarterly history.
             max_staleness_days: nullify TTM if the most recent quarterly filing
                                 predates the as_of_date by more than this many days.
+                                Default ``None`` keeps every value; ``age_days``
+                                is always returned regardless.
 
-        Returns DataFrame with columns: as_of_date, ticker, ttm_val, n_periods, filed
+        Returns DataFrame with columns:
+            as_of_date, ticker, ttm_val, n_periods, filed, age_days
         """
         if isinstance(as_of_dates, str):
             as_of_dates = [as_of_dates]
@@ -396,7 +424,12 @@ class PitQuery:
 
         if not ttm_frames:
             cross[["ttm_val", "n_periods", "filed"]] = [float("nan"), 0, pd.NaT]  # type: ignore[list-item,assignment]
-            return cross.sort_values(["as_of_date", "ticker"]).reset_index(drop=True)
+            cross["age_days"] = pd.array([pd.NA] * len(cross), dtype="Int64")
+            return (
+                cross[["as_of_date", "ticker", "ttm_val", "n_periods", "filed", "age_days"]]
+                .sort_values(["as_of_date", "ticker"])
+                .reset_index(drop=True)
+            )
 
         # Sort by filed globally so the key column is monotonic for merge_asof.
         all_events = pd.concat(ttm_frames, ignore_index=True).sort_values("filed")
@@ -411,11 +444,14 @@ class PitQuery:
             direction="backward",
         )
 
-        # Staleness check.
-        staleness = (result["as_of_date"] - result["filed"]).dt.days
-        stale = result["filed"].isna() | (staleness > max_staleness_days)
-        result.loc[stale, "ttm_val"] = float("nan")
-        result.loc[stale, "n_periods"] = 0
+        # Always surface age_days so callers can decide what to do with stale rows.
+        result["age_days"] = (result["as_of_date"] - result["filed"]).dt.days.astype("Int64")
+
+        # Only nullify when the caller opts in by passing an int.
+        if max_staleness_days is not None:
+            stale = result["filed"].isna() | (result["age_days"] > max_staleness_days)
+            result.loc[stale, "ttm_val"] = float("nan")
+            result.loc[stale, "n_periods"] = 0
 
         # Add tickers that had no 10-Q data at all.
         missing = [t for t in universe if t not in tickers_with_data]
@@ -425,10 +461,11 @@ class PitQuery:
                 columns=["ticker", "as_of_date"],
             )
             filler[["ttm_val", "n_periods", "filed"]] = [float("nan"), 0, pd.NaT]  # type: ignore[list-item,assignment]
+            filler["age_days"] = pd.array([pd.NA] * len(filler), dtype="Int64")
             result = pd.concat([result, filler], ignore_index=True)
 
         return (
-            result[["as_of_date", "ticker", "ttm_val", "n_periods", "filed"]]
+            result[["as_of_date", "ticker", "ttm_val", "n_periods", "filed", "age_days"]]
             .sort_values(["as_of_date", "ticker"])
             .reset_index(drop=True)
         )
@@ -438,7 +475,7 @@ class PitQuery:
         concept: str,
         as_of_dates: str | list[str] | pd.DatetimeIndex,
         tickers: list[str] | None = None,
-        max_staleness_days: int = 100,
+        max_staleness_days: int | None = None,
     ) -> pd.DataFrame:
         """Snapshot values for a full universe of tickers across one or more dates.
 
@@ -454,14 +491,25 @@ class PitQuery:
         For quick ad-hoc lookups on one or a few tickers at a single date, as_of()
         is more ergonomic (no as_of_date column in the result).
 
+        The result always includes an ``age_days`` column (as_of_date − filed in
+        days) so callers can decide what to do with stale values themselves. When
+        ``max_staleness_days`` is set to an int, values whose underlying filing
+        is older than that many days are nullified.
+
+        v0.2.x changed the default from 100 to None to surface signal; pass an
+        int to restore the previous behavior.
+
         Args:
             concept:            XBRL concept, e.g. "us-gaap:Assets".
             as_of_dates:        one date string or a list/DatetimeIndex of dates.
             tickers:            subset of tickers; defaults to full universe.
             max_staleness_days: nullify value if the last filing predates the
-                                as_of_date by more than this many days.
+                                as_of_date by more than this many days. Default
+                                ``None`` keeps every value; ``age_days`` is always
+                                returned regardless.
 
-        Returns DataFrame with columns: as_of_date, ticker, val, filed, end, form
+        Returns DataFrame with columns:
+            as_of_date, ticker, val, filed, end, form, age_days
         """
         if isinstance(as_of_dates, str):
             as_of_dates = [as_of_dates]
@@ -499,7 +547,12 @@ class PitQuery:
 
         if not snap_frames:
             cross[["val", "filed", "end", "form"]] = [float("nan"), pd.NaT, pd.NaT, None]
-            return cross.sort_values(["as_of_date", "ticker"]).reset_index(drop=True)
+            cross["age_days"] = pd.array([pd.NA] * len(cross), dtype="Int64")
+            return (
+                cross[["as_of_date", "ticker", "val", "filed", "end", "form", "age_days"]]
+                .sort_values(["as_of_date", "ticker"])
+                .reset_index(drop=True)
+            )
 
         # Sort by filed globally (not ticker-first) so the key column is monotonic.
         all_events = pd.concat(snap_frames, ignore_index=True).sort_values("filed")
@@ -514,10 +567,13 @@ class PitQuery:
             direction="backward",
         )
 
-        # Staleness check.
-        staleness = (result["as_of_date"] - result["filed"]).dt.days
-        stale = result["filed"].isna() | (staleness > max_staleness_days)
-        result.loc[stale, "val"] = float("nan")
+        # Always surface age_days so callers can decide what to do with stale rows.
+        result["age_days"] = (result["as_of_date"] - result["filed"]).dt.days.astype("Int64")
+
+        # Only nullify when the caller opts in by passing an int.
+        if max_staleness_days is not None:
+            stale = result["filed"].isna() | (result["age_days"] > max_staleness_days)
+            result.loc[stale, "val"] = float("nan")
 
         # Add tickers with no data at all.
         missing = [t for t in universe if t not in tickers_with_data]
@@ -527,10 +583,11 @@ class PitQuery:
                 columns=["ticker", "as_of_date"],
             )
             filler[["val", "filed", "end", "form"]] = [float("nan"), pd.NaT, pd.NaT, None]
+            filler["age_days"] = pd.array([pd.NA] * len(filler), dtype="Int64")
             result = pd.concat([result, filler], ignore_index=True)
 
         return (
-            result[["as_of_date", "ticker", "val", "filed", "end", "form"]]
+            result[["as_of_date", "ticker", "val", "filed", "end", "form", "age_days"]]
             .sort_values(["as_of_date", "ticker"])
             .reset_index(drop=True)
         )
@@ -548,5 +605,6 @@ class PitQuery:
                 "filed": pd.NaT,
                 "end": pd.NaT,
                 "form": None,
+                "age_days": pd.array([pd.NA] * len(tickers), dtype="Int64"),
             }
         )

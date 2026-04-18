@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-04-20
+
+### Changed
+- **BREAKING for callers relying on auto-nullification**: `PitQuery.as_of`,
+  `PitQuery.cross_section`, and `PitQuery.ttm_cross_section` now default
+  `max_staleness_days=None`. Previously the default was `100`, which silently
+  set `val` / `ttm_val` to NaN whenever the most recent filing was older than
+  100 days. The new default returns the value as-is and lets the caller decide.
+  To restore the previous behavior, pass `max_staleness_days=100` explicitly.
+
+### Added
+- **`age_days` column** on every `as_of`, `cross_section`, and
+  `ttm_cross_section` result: `(as_of_date − filed)` in days as a nullable
+  `Int64`. Missing-data rows surface `<NA>` (not `0`) so they are
+  distinguishable from a same-day filing. Use this to threshold staleness in
+  user code instead of (or in addition to) `max_staleness_days`.
+
 ## [0.2.9] - 2026-04-18
 
 ### Changed
