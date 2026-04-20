@@ -23,9 +23,35 @@ DEFAULT_CONCEPTS = [
 ]
 
 # Maps deprecated/variant XBRL tags to their canonical concept in DEFAULT_CONCEPTS.
-# Applied at parse time so the parquet always uses canonical names.
+# Applied at parse time so the parquet always uses canonical names. The parser tries
+# the canonical tag first, falling back to each alias only if the canonical is absent —
+# so when both are present the canonical value wins (no double-counting).
 CONCEPT_ALIASES: dict[str, str] = {
+    # --- Revenue family -> us-gaap:Revenues ---
+    # Post-ASC 606 standard tag (mandatory from 2018 onward for most filers)
     "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax": "us-gaap:Revenues",
+    # ASC 606 variant that includes assessed taxes (e.g. sales tax) in the topline
+    "us-gaap:RevenueFromContractWithCustomerIncludingAssessedTax": "us-gaap:Revenues",
+    # Pre-ASC 606 deprecated tags still used by some filers / historical filings
+    "us-gaap:SalesRevenueNet": "us-gaap:Revenues",
+    "us-gaap:SalesRevenueGoodsNet": "us-gaap:Revenues",
+    "us-gaap:Revenue": "us-gaap:Revenues",
+    # --- Net income family -> us-gaap:NetIncomeLoss ---
+    # CAVEAT: ProfitLoss is NOT identical to NetIncomeLoss — ProfitLoss is the
+    # consolidated bottom line BEFORE allocating income to non-controlling (minority)
+    # interests, while NetIncomeLoss is attributable to the parent only. We map it
+    # as a fallback so companies that only file ProfitLoss are still represented;
+    # the canonical-first lookup ensures NetIncomeLoss wins whenever both are present.
+    "us-gaap:ProfitLoss": "us-gaap:NetIncomeLoss",
+    # --- Cash family -> us-gaap:CashAndCashEquivalentsAtCarryingValue ---
+    # Post-ASU 2016-18 tag that bundles restricted cash with cash & equivalents
+    "us-gaap:CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents": "us-gaap:CashAndCashEquivalentsAtCarryingValue",
+    # Bare "Cash" tag used by a minority of filers (typically smaller / older filings)
+    "us-gaap:Cash": "us-gaap:CashAndCashEquivalentsAtCarryingValue",
+    # --- Long-term debt -> us-gaap:LongTermDebt ---
+    # Many filers report only the noncurrent portion under this tag
+    "us-gaap:LongTermDebtNoncurrent": "us-gaap:LongTermDebt",
+    # --- Operating cash flow ---
     "us-gaap:OperatingCashFlow": "us-gaap:NetCashProvidedByUsedInOperatingActivities",
 }
 

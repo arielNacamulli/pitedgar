@@ -417,6 +417,83 @@ def test_parse_company_restated_value_preserved_after_dedup(tmp_path):
     assert set(df["accn"]) == {"R1", "R2"}
 
 
+def test_parse_company_sales_revenue_net_alias(tmp_path):
+    """A filer that uses only the deprecated SalesRevenueNet tag (no us-gaap:Revenues)
+    must still produce rows under the canonical us-gaap:Revenues concept."""
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "SalesRevenueNet": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2017-01-01",
+                                "end": "2017-12-31",
+                                "filed": "2018-02-15",
+                                "val": 250_000_000,
+                                "form": "10-K",
+                                "accn": "SRN1",
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    cik = "0000000010"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+    df = parse_company(cik, ["us-gaap:Revenues"], tmp_path, ["10-K"])
+    assert len(df) == 1
+    assert df.iloc[0]["concept"] == "us-gaap:Revenues"
+    assert df.iloc[0]["val"] == pytest.approx(250_000_000)
+
+
+def test_parse_company_canonical_revenues_wins_over_sales_revenue_net(tmp_path):
+    """When both us-gaap:Revenues and the deprecated SalesRevenueNet are present,
+    the canonical Revenues value must win (no double-counting)."""
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "Revenues": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2017-01-01",
+                                "end": "2017-12-31",
+                                "filed": "2018-02-15",
+                                "val": 700_000_000,
+                                "form": "10-K",
+                                "accn": "REV1",
+                            },
+                        ]
+                    }
+                },
+                "SalesRevenueNet": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2017-01-01",
+                                "end": "2017-12-31",
+                                "filed": "2018-02-15",
+                                "val": 250_000_000,
+                                "form": "10-K",
+                                "accn": "SRN1",
+                            },
+                        ]
+                    }
+                },
+            }
+        }
+    }
+    cik = "0000000011"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+    df = parse_company(cik, ["us-gaap:Revenues"], tmp_path, ["10-K"])
+    assert len(df) == 1
+    assert df.iloc[0]["concept"] == "us-gaap:Revenues"
+    # Canonical (Revenues) is tried first, so its value wins (no double-counting)
+    assert df.iloc[0]["val"] == pytest.approx(700_000_000)
+
+
 def test_parse_company_missing_file(tmp_path):
     df = parse_company("9999999999", ["us-gaap:Revenues"], tmp_path, ["10-K"])
     assert df.empty
