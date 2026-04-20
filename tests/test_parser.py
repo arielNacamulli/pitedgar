@@ -448,6 +448,119 @@ def test_parse_company_sales_revenue_net_alias(tmp_path):
     assert df.iloc[0]["val"] == pytest.approx(250_000_000)
 
 
+def test_parse_company_unions_canonical_and_alias_across_periods(tmp_path):
+    """A filer may report disjoint periods under canonical and alias tags (e.g.
+    pre-ASC 606 years under us-gaap:Revenues and post-ASC 606 years under
+    us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax). The parser
+    must union all rows — not stop at the first tag that has data."""
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "Revenues": {
+                    "units": {
+                        "USD": [
+                            # Period A — only reported under canonical
+                            {
+                                "start": "2016-01-01",
+                                "end": "2016-12-31",
+                                "filed": "2017-02-15",
+                                "val": 200_000_000,
+                                "form": "10-K",
+                                "accn": "OLD1",
+                            },
+                        ]
+                    }
+                },
+                "RevenueFromContractWithCustomerExcludingAssessedTax": {
+                    "units": {
+                        "USD": [
+                            # Periods B, C, D — only reported under the post-ASC 606 alias
+                            {
+                                "start": "2018-01-01",
+                                "end": "2018-12-31",
+                                "filed": "2019-02-15",
+                                "val": 300_000_000,
+                                "form": "10-K",
+                                "accn": "NEW1",
+                            },
+                            {
+                                "start": "2019-01-01",
+                                "end": "2019-12-31",
+                                "filed": "2020-02-15",
+                                "val": 400_000_000,
+                                "form": "10-K",
+                                "accn": "NEW2",
+                            },
+                            {
+                                "start": "2020-01-01",
+                                "end": "2020-12-31",
+                                "filed": "2021-02-15",
+                                "val": 500_000_000,
+                                "form": "10-K",
+                                "accn": "NEW3",
+                            },
+                        ]
+                    }
+                },
+            }
+        }
+    }
+    cik = "0000000020"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+    df = parse_company(cik, ["us-gaap:Revenues"], tmp_path, ["10-K"])
+    # 1 canonical + 3 alias = 4 rows, all stored under the canonical concept name.
+    assert len(df) == 4
+    assert set(df["concept"]) == {"us-gaap:Revenues"}
+    assert set(df["accn"]) == {"OLD1", "NEW1", "NEW2", "NEW3"}
+    assert set(df["val"]) == {200_000_000.0, 300_000_000.0, 400_000_000.0, 500_000_000.0}
+
+
+def test_parse_company_canonical_wins_over_alias_same_period_different_value(tmp_path):
+    """When canonical and alias both report the same (end, filed, form), the
+    canonical value must win — no double-counting, canonical takes precedence."""
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "Revenues": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2023-01-01",
+                                "end": "2023-12-31",
+                                "filed": "2024-02-01",
+                                "val": 1_000_000_000,
+                                "form": "10-K",
+                                "accn": "CANON",
+                            },
+                        ]
+                    }
+                },
+                "RevenueFromContractWithCustomerExcludingAssessedTax": {
+                    "units": {
+                        "USD": [
+                            # Same (end, filed, form) as the canonical row, different value
+                            {
+                                "start": "2023-01-01",
+                                "end": "2023-12-31",
+                                "filed": "2024-02-01",
+                                "val": 1_200_000_000,
+                                "form": "10-K",
+                                "accn": "ALIAS",
+                            },
+                        ]
+                    }
+                },
+            }
+        }
+    }
+    cik = "0000000021"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+    df = parse_company(cik, ["us-gaap:Revenues"], tmp_path, ["10-K"])
+    assert len(df) == 1
+    assert df.iloc[0]["val"] == pytest.approx(1_000_000_000)
+    assert df.iloc[0]["accn"] == "CANON"
+
+
 def test_parse_company_canonical_revenues_wins_over_sales_revenue_net(tmp_path):
     """When both us-gaap:Revenues and the deprecated SalesRevenueNet are present,
     the canonical Revenues value must win (no double-counting)."""
