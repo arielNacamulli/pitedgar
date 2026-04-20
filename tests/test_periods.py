@@ -22,10 +22,18 @@ def test_is_annual_inclusive_bounds_no_form():
     assert result == [False, True, True, True, False]
 
 
-def test_is_annual_with_form_requires_10k():
+def test_is_annual_with_form_requires_annual_form():
     duration = pd.Series([365, 365, 365])
-    form = pd.Series(["10-K", "10-Q", "10-K/A"])
+    form = pd.Series(["10-K", "10-Q", "8-K"])
     assert is_annual(duration, form).tolist() == [True, False, False]
+
+
+def test_is_annual_accepts_amendments_and_20f():
+    """10-K/A, 20-F, and 20-F/A are all valid annual filings."""
+    duration = pd.Series([365, 365, 365, 365])
+    form = pd.Series(["10-K/A", "20-F", "20-F/A", "10-Q/A"])
+    # 10-K/A, 20-F, 20-F/A → annual; 10-Q/A → not annual
+    assert is_annual(duration, form).tolist() == [True, True, True, False]
 
 
 def test_is_annual_with_form_still_checks_duration():

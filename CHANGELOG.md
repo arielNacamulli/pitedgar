@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-04-18
+
+### Added
+- **Amendments and foreign private issuers in `DEFAULT_FORMS`**: `10-K/A`, `10-Q/A`, `20-F`, and `20-F/A` are now ingested by default. Amendments carry corrected (often substantially restated) data and were previously dropped silently; foreign private issuers reporting on `20-F` were missing entirely. The parser's `(concept, end)` PIT dedup keeps both the original and the amendment as separate rows so the query layer can still pick the latest-filed value at any as-of date.
+- **Tests**: parser keeps a `10-K/A` alongside the original `10-K` for the same `period_end`; `as_of()` returns the `10-K/A` restated value once the amendment has been filed; `is_annual()` accepts `10-K/A`, `20-F`, and `20-F/A`.
+
+### Changed
+- **Form-based filtering centralised**: `pitedgar.periods` now exposes `_ANNUAL_FORMS = {10-K, 10-K/A, 20-F, 20-F/A}` and `_QUARTERLY_FORMS = {10-Q, 10-Q/A}`. `is_annual()` and `PitQuery.history(freq=...)` use these sets instead of bare `form == "10-K"` / `"10-Q"` comparisons, so amendments and 20-F filings flow through the annual/quarterly code paths consistently.
+
+### Migration
+- Run `pitedgar build --force` to pick up `10-K/A`, `10-Q/A`, `20-F`, and `20-F/A` filings already present under `data/companyfacts/` — the parquet must be rebuilt for the new forms to appear.
+
 ## [0.2.6] - 2026-04-18
 
 ### Added

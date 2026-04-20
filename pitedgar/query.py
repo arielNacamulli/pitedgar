@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from pitedgar.periods import is_annual, is_quarterly
+from pitedgar.periods import _ANNUAL_FORMS, _QUARTERLY_FORMS, is_annual, is_quarterly
 
 
 def _snapshot_events(grp: pd.DataFrame) -> pd.DataFrame:
@@ -235,9 +235,9 @@ class PitQuery:
         sub = self.data.loc[mask].copy()
 
         if freq == "Q":
-            sub = sub[sub["form"] == "10-Q"]
+            sub = sub[sub["form"].isin(_QUARTERLY_FORMS)]
         elif freq == "A":
-            sub = sub[sub["form"] == "10-K"]
+            sub = sub[sub["form"].isin(_ANNUAL_FORMS)]
 
         if start_date is not None:
             sub = sub[sub["end"] >= pd.Timestamp(start_date)]

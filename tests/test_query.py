@@ -683,6 +683,47 @@ def test_ttm_cross_section_quarterly_data_from_10k(tmp_path):
     assert row["n_periods"] == 4
 
 
+def test_as_of_10ka_supersedes_10k(tmp_path):
+    """A 10-K/A amendment filed after the original 10-K must supersede the 10-K
+    value in as_of() queries dated AFTER the amendment was filed."""
+    records = [
+        # Original 10-K
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2022-12-31",
+            "filed": "2023-02-02",
+            "val": 1_000_000_000.0,
+            "form": "10-K",
+            "accn": "ORIG",
+        },
+        # 10-K/A restating the same period months later
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2022-12-31",
+            "filed": "2023-09-15",
+            "val": 1_120_000_000.0,
+            "form": "10-K/A",
+            "accn": "AMEND",
+        },
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    q = PitQuery(path)
+
+    # Before the amendment is filed, the original 10-K value is the latest known.
+    before = q.as_of("AAPL", CONCEPT, "2023-06-01", max_staleness_days=365)
+    assert before.iloc[0]["val"] == pytest.approx(1_000_000_000.0)
+    assert before.iloc[0]["form"] == "10-K"
+
+    # After the amendment is filed, it must supersede the original.
+    after = q.as_of("AAPL", CONCEPT, "2023-10-01", max_staleness_days=365)
+    assert after.iloc[0]["val"] == pytest.approx(1_120_000_000.0)
+    assert after.iloc[0]["form"] == "10-K/A"
+
+
 def test_history_returns_latest_filed_per_end(tmp_path):
     """history() must return the restated (latest-filed) value for each period end."""
     records = [

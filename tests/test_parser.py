@@ -572,3 +572,47 @@ def test_parse_all_force_reparses(tmp_path):
     with patch.object(parser_mod, "parse_company", wraps=parser_mod.parse_company) as mock_pc:
         parse_all(config, cik_map, force=True)
         assert mock_pc.call_count >= 1
+
+
+def test_parse_company_keeps_10ka_alongside_10k(tmp_path):
+    """A 10-K/A amendment with a restated value for the same period_end as the
+    original 10-K must be retained in the parquet so the query layer can pick
+    the latest-filed value. This is the core invariant that makes including
+    amendments in DEFAULT_FORMS safe — the parser does not collapse them."""
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "Revenues": {
+                    "units": {
+                        "USD": [
+                            # Original 10-K
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 1_000_000_000,
+                                "form": "10-K",
+                                "accn": "ORIG",
+                            },
+                            # 10-K/A amendment with a restated value for the same period
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-09-15",
+                                "val": 1_120_000_000,
+                                "form": "10-K/A",
+                                "accn": "AMEND",
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    cik = "0000000099"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+    df = parse_company(cik, ["us-gaap:Revenues"], tmp_path, ["10-K", "10-K/A"])
+    assert len(df) == 2
+    assert set(df["form"]) == {"10-K", "10-K/A"}
+    assert set(df["accn"]) == {"ORIG", "AMEND"}
+    assert set(df["val"]) == {1_000_000_000.0, 1_120_000_000.0}
