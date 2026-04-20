@@ -846,6 +846,102 @@ def test_ttm_cross_section_missing_ticker_age_days_na(ttm_parquet_path):
     assert pd.isna(msft["age_days"])
 
 
+def test_history_freq_q_picks_up_quarterly_data_from_10k(tmp_path):
+    """history(freq='Q') must include discrete quarterly values reported inside a 10-K
+    (e.g. AAPL us-gaap:Revenues comparative disclosures: form='10-K', duration≈90d)."""
+    records = [
+        # Quarterly values disclosed inside the annual 10-K as comparatives.
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2022-03-26",
+            "filed": "2023-02-02",
+            "val": 97278000000.0,
+            "form": "10-K",
+            "accn": "AQ1",
+            "duration_days": 90,
+        },
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2022-06-25",
+            "filed": "2023-02-02",
+            "val": 82959000000.0,
+            "form": "10-K",
+            "accn": "AQ2",
+            "duration_days": 91,
+        },
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2022-09-24",
+            "filed": "2023-02-02",
+            "val": 90146000000.0,
+            "form": "10-K",
+            "accn": "AQ3",
+            "duration_days": 91,
+        },
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    q = PitQuery(path)
+    h = q.history("AAPL", CONCEPT, freq="Q")
+    assert len(h) == 3
+    assert set(h["form"]) == {"10-K"}
+    assert all((h["end"].dt.year == 2022))
+
+
+def test_history_freq_a_returns_annual_and_freq_q_does_not(tmp_path):
+    """A 365-day 10-K row must be returned by freq='A' but NOT by freq='Q'."""
+    records = [
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2022-12-31",
+            "filed": "2023-02-02",
+            "val": 394328000000.0,
+            "form": "10-K",
+            "accn": "ANN1",
+            "duration_days": 365,
+        },
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    q = PitQuery(path)
+    h_a = q.history("AAPL", CONCEPT, freq="A")
+    assert len(h_a) == 1
+    assert h_a.iloc[0]["form"] == "10-K"
+    h_q = q.history("AAPL", CONCEPT, freq="Q")
+    assert h_q.empty
+
+
+def test_history_freq_q_excludes_mid_year_10q_with_long_duration(tmp_path):
+    """A 10-Q with duration_days=180 (outside 60-105 quarterly range) must be excluded by freq='Q'."""
+    records = [
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2022-06-30",
+            "filed": "2022-07-28",
+            "val": 123456789.0,
+            "form": "10-Q",
+            "accn": "WEIRD",
+            "duration_days": 180,
+        },
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    q = PitQuery(path)
+    h = q.history("AAPL", CONCEPT, freq="Q")
+    assert h.empty
+    # freq=None/other keeps it
+    h_all = q.history("AAPL", CONCEPT, freq="all")
+    assert len(h_all) == 1
+
+
 def test_history_returns_latest_filed_per_end(tmp_path):
     """history() must return the restated (latest-filed) value for each period end."""
     records = [
