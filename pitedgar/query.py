@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from pitedgar.periods import _ANNUAL_FORMS, _QUARTERLY_FORMS, is_annual, is_quarterly
+from pitedgar.periods import is_annual, is_quarterly
 
 
 def _snapshot_events(grp: pd.DataFrame) -> pd.DataFrame:
@@ -243,18 +243,26 @@ class PitQuery:
             concept:    XBRL concept, e.g. "us-gaap:Revenues".
             start_date: filter end >= start_date (ISO string).
             end_date:   filter end <= end_date (ISO string).
-            freq:       "Q" → 10-Q only, "A" → 10-K only, anything else → all.
+            freq:       "Q" → quarterly periods (60-105 days),
+                        "A" → annual filings (10-K/A/20-F with 340-380 day duration),
+                        anything else → all.
 
         Returns DataFrame with columns: ticker, concept, end, filed, val, form, accn.
         For each period end, shows the latest-filed (restated) value.
         """
         mask = (self.data["ticker"] == ticker) & (self.data["concept"] == concept)
-        sub = self.data.loc[mask].copy()
 
+        # Classify by duration_days, not form: some filers (notably Apple for
+        # us-gaap:Revenues) report quarterly breakdowns inside the annual 10-K
+        # as comparative disclosures. A form-based filter would miss them.
+        # Annual still requires an annual form so non-annual filings with
+        # coincidentally long durations aren't misclassified.
         if freq == "Q":
-            sub = sub[sub["form"].isin(_QUARTERLY_FORMS)]
+            mask &= is_quarterly(self.data["duration_days"])
         elif freq == "A":
-            sub = sub[sub["form"].isin(_ANNUAL_FORMS)]
+            mask &= is_annual(self.data["duration_days"], self.data["form"])
+
+        sub = self.data.loc[mask].copy()
 
         if start_date is not None:
             sub = sub[sub["end"] >= pd.Timestamp(start_date)]
