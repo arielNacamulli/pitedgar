@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-04-20
+
+### Fixed
+- **Parser alias resolution silently dropped post-ASC 606 data**: `parse_company` stopped at the first candidate tag (canonical or alias) that had entries, ignoring all others. Filers that reported `us-gaap:Revenues` even for a single historical period had their modern `RevenueFromContractWithCustomerExcludingAssessedTax` / `SalesRevenueNet` records discarded — e.g. AAPL's 109 post-2017 revenue records were lost because 11 pre-2019 rows under canonical `Revenues` matched first. The parser now unions entries from every candidate and dedups by `(end, filed, form)` with canonical-first precedence. Rebuild with `pitedgar build --force` to recover the missing coverage.
+- **`PitQuery.history(freq='Q')` returned empty for companies reporting quarterly breakdowns in 10-K filings**: the filter previously required `form ∈ {10-Q, 10-Q/A}`, but companies like AAPL report historical quarterly `Revenues` as comparative data inside the annual 10-K. `history()` now uses `is_quarterly(duration_days)` (aligning with `ttm()`, which already did the right thing) so quarterly values filed on any form are surfaced.
+
 ## [0.3.0] - 2026-04-20
 
 ### Changed
