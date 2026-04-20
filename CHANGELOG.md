@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`PitQuery.ttm()` / `ttm_cross_section()` inflated TTM for YTD-only filers**: companies that tag their quarterly disclosures only as year-to-date cumulative values (notably AAPL post-2021 for `us-gaap:NetIncomeLoss` / `us-gaap:Revenues` — Q1=90d, Q2=181d, Q3=272d, 10-K=363d, all sharing the same fiscal-year `start`) had no discrete 3-month rows for the TTM algorithm to sum. Result: `_ttm_events` fell back to summing the four most recent 90-day Q1 entries from consecutive fiscal years, producing a ~35% inflated TTM (AAPL TTM NetIncomeLoss at 2024-11-01 returned ~$127B instead of the published FY2024 figure of $93.7B). The query layer now synthesizes the missing 3-month rows from consecutive YTD records sharing the same `start`: `Q2_3m = YTD_6m − YTD_3m`, `Q3_3m = YTD_9m − YTD_6m`, `Q4_3m = FY − YTD_9m`. Synthetic rows are filed at `max(prev.filed, curr.filed)` (no look-ahead) and their `accn` is suffixed with `:DERIVED_YTD_DIFF` for audit. Explicit 3-month rows continue to take precedence over synthesized ones at the same `(end, filed)`, so filers with discrete quarterly tags (e.g. pre-2020 MSFT) see identical TTM output.
+
 ## [0.3.1] - 2026-04-20
 
 ### Fixed
