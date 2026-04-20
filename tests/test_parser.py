@@ -5,7 +5,7 @@ import json
 import pandas as pd
 import pytest
 
-from pitedgar.config import PitEdgarConfig
+from pitedgar.config import DEFAULT_CONCEPTS, PitEdgarConfig
 from pitedgar.parser import parse_all, parse_company
 
 SAMPLE_FACTS = {
@@ -497,6 +497,214 @@ def test_parse_company_canonical_revenues_wins_over_sales_revenue_net(tmp_path):
 def test_parse_company_missing_file(tmp_path):
     df = parse_company("9999999999", ["us-gaap:Revenues"], tmp_path, ["10-K"])
     assert df.empty
+
+
+def test_parse_company_none_concepts_extracts_non_default_concept(tmp_path):
+    """concepts=None must pull in tags that are NOT part of the curated DEFAULT_CONCEPTS list."""
+    obscure_concept = "us-gaap:GoodwillImpairmentLoss"
+    assert obscure_concept not in DEFAULT_CONCEPTS  # guard against future curation changes
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "GoodwillImpairmentLoss": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 25_000_000,
+                                "form": "10-K",
+                                "accn": "G1",
+                            },
+                        ]
+                    }
+                },
+                "Revenues": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 800_000_000,
+                                "form": "10-K",
+                                "accn": "R1",
+                            },
+                        ]
+                    }
+                },
+            }
+        }
+    }
+    cik = "0000000100"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+
+    df = parse_company(cik, None, tmp_path, ["10-K"])
+    assert obscure_concept in set(df["concept"])
+    assert "us-gaap:Revenues" in set(df["concept"])
+    goodwill_row = df[df["concept"] == obscure_concept].iloc[0]
+    assert goodwill_row["val"] == pytest.approx(25_000_000)
+
+
+def test_parse_company_empty_concepts_behaves_like_none(tmp_path):
+    """An empty concepts list must trigger the same "parse all" code path as None."""
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "AccruedLiabilitiesCurrent": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 50_000_000,
+                                "form": "10-K",
+                                "accn": "AL1",
+                            },
+                        ]
+                    }
+                },
+            }
+        }
+    }
+    cik = "0000000101"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+
+    df = parse_company(cik, [], tmp_path, ["10-K"])
+    assert "us-gaap:AccruedLiabilitiesCurrent" in set(df["concept"])
+
+
+def test_parse_company_none_canonicalizes_aliases(tmp_path):
+    """When parsing all concepts, alias tags must still be stored under the canonical name."""
+    facts = {
+        "facts": {
+            "us-gaap": {
+                # Alias-only filer (post-ASC 606 revenue tag, no canonical Revenues)
+                "RevenueFromContractWithCustomerExcludingAssessedTax": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2023-01-01",
+                                "end": "2023-12-31",
+                                "filed": "2024-02-01",
+                                "val": 600_000_000,
+                                "form": "10-K",
+                                "accn": "AL1",
+                            },
+                        ]
+                    }
+                },
+            }
+        }
+    }
+    cik = "0000000102"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+
+    df = parse_company(cik, None, tmp_path, ["10-K"])
+    # Concept must appear as the canonical name, not the alias
+    assert set(df["concept"]) == {"us-gaap:Revenues"}
+    assert df.iloc[0]["val"] == pytest.approx(600_000_000)
+
+
+def test_parse_company_none_skips_unknown_non_usd_non_shares(tmp_path):
+    """Concepts reported only in foreign/exotic units must be silently skipped, not crash."""
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "SomeForeignCurrencyConcept": {
+                    "units": {
+                        "EUR": [
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 1_000_000,
+                                "form": "10-K",
+                                "accn": "F1",
+                            },
+                        ]
+                    }
+                },
+                "Revenues": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 800_000_000,
+                                "form": "10-K",
+                                "accn": "R1",
+                            },
+                        ]
+                    }
+                },
+            }
+        }
+    }
+    cik = "0000000103"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+
+    df = parse_company(cik, None, tmp_path, ["10-K"])
+    # The EUR-only concept must NOT appear; Revenues must.
+    assert "us-gaap:SomeForeignCurrencyConcept" not in set(df["concept"])
+    assert "us-gaap:Revenues" in set(df["concept"])
+
+
+def test_parse_all_default_config_parses_all_concepts(tmp_path):
+    """A PitEdgarConfig with no explicit concepts should extract every us-gaap tag."""
+    cik = "0000320193"
+    facts_dir = tmp_path / "companyfacts"
+    facts_dir.mkdir()
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "Revenues": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 1_000_000_000,
+                                "form": "10-K",
+                                "accn": "X1",
+                            },
+                        ]
+                    }
+                },
+                "GoodwillImpairmentLoss": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 25_000_000,
+                                "form": "10-K",
+                                "accn": "X2",
+                            },
+                        ]
+                    }
+                },
+            }
+        }
+    }
+    (facts_dir / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+
+    config = PitEdgarConfig(
+        edgar_identity="Test test@example.com",
+        data_dir=tmp_path,
+        facts_dir=facts_dir,
+    )
+    # Sanity check: the new default is "parse everything"
+    assert config.concepts is None
+
+    master = parse_all(config, pd.DataFrame({"cik": [cik]}, index=pd.Index(["AAPL"], name="ticker")))
+    assert "us-gaap:GoodwillImpairmentLoss" in set(master["concept"])
+    assert "us-gaap:Revenues" in set(master["concept"])
 
 
 def test_parse_all(tmp_path):

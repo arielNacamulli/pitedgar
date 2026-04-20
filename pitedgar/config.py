@@ -70,7 +70,12 @@ class PitEdgarConfig(BaseModel):
     data_dir: Path
     facts_dir: Path = None  # type: ignore[assignment]
     zip_url: str = BULK_ZIP_URL
-    concepts: list[str] = DEFAULT_CONCEPTS
+    # ``concepts`` controls which us-gaap tags are extracted from the per-company JSON.
+    # ``None`` (the default) or an empty list means "parse every us-gaap concept present
+    # in the JSON" — recommended so the parquet contains the full universe of tags and
+    # iterating on new signals does not require rebuilding the 1.5 GB cache. Pass an
+    # explicit list (e.g. ``DEFAULT_CONCEPTS``) to opt back into the curated subset.
+    concepts: list[str] | None = None
     forms: list[str] = DEFAULT_FORMS
 
     model_config = {"arbitrary_types_allowed": True}

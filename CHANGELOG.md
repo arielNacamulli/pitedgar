@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.9] - 2026-04-18
+
+### Changed
+- **Parser default now extracts every us-gaap concept**: `PitEdgarConfig.concepts` defaults to `None`, which causes `parse_company` / `parse_all` to iterate every `us-gaap:*` tag present in the per-company JSON instead of only the 15 in `DEFAULT_CONCEPTS`. Disk is cheap and parquet compresses well, so the broader output eliminates the need to re-parse the 1.5 GB cache when iterating on new quant signals. `CONCEPT_ALIASES` is still applied, so e.g. a filer reporting only `RevenueFromContractWithCustomerExcludingAssessedTax` still lands under `us-gaap:Revenues` in the parquet. **Migration**: rebuild the parquet with `pitedgar build --force` to populate the broader concept set; pass `concepts=DEFAULT_CONCEPTS` to keep the curated subset.
+
 ## [0.2.8] - 2026-04-18
 
 ### Added
