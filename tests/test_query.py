@@ -889,7 +889,7 @@ def test_history_freq_q_picks_up_quarterly_data_from_10k(tmp_path):
     h = q.history("AAPL", CONCEPT, freq="Q")
     assert len(h) == 3
     assert set(h["form"]) == {"10-K"}
-    assert all((h["end"].dt.year == 2022))
+    assert all(h["end"].dt.year == 2022)
 
 
 def test_history_freq_a_returns_annual_and_freq_q_does_not(tmp_path):
@@ -981,3 +981,251 @@ def test_history_returns_latest_filed_per_end(tmp_path):
     assert len(h) == 2  # one row per period end
     q1 = h[h["end"] == pd.Timestamp("2023-03-31")].iloc[0]
     assert q1["val"] == pytest.approx(55.0)  # restated value, not 50.0
+
+
+# ---------------------------------------------------------------------------
+# YTD-chain synthesis (AAPL post-2021 pattern)
+# ---------------------------------------------------------------------------
+
+
+AAPL_FY24_NI = [
+    # AAPL FY2024 NetIncomeLoss, post-2021 tagging pattern: only YTD rows.
+    # Values (in USD) from the SEC filings; TTM after the 10-K should equal
+    # the published FY2024 net income of $93,736M.
+    ("2023-12-30", "2024-02-02", 33916000000.0, "10-Q", 90),  # Q1 FY24 YTD
+    ("2024-03-30", "2024-05-03", 57564000000.0, "10-Q", 181),  # Q2 FY24 YTD
+    ("2024-06-29", "2024-08-02", 79000000000.0, "10-Q", 272),  # Q3 FY24 YTD
+    ("2024-09-28", "2024-11-01", 93736000000.0, "10-K", 363),  # FY24 annual
+]
+
+AAPL_FY24_REV = [
+    ("2023-12-30", "2024-02-02", 119575000000.0, "10-Q", 90),
+    ("2024-03-30", "2024-05-03", 210328000000.0, "10-Q", 181),
+    ("2024-06-29", "2024-08-02", 296135000000.0, "10-Q", 272),
+    ("2024-09-28", "2024-11-01", 391035000000.0, "10-K", 363),
+]
+
+
+def _aapl_ytd_records(concept: str, entries: list[tuple], fy_start: str = "2023-10-01") -> list[dict]:
+    """Build YTD-only records for a ticker/concept mimicking AAPL post-2021 tagging."""
+    return [
+        {
+            "ticker": "AAPL",
+            "concept": concept,
+            "start": fy_start,
+            "end": end,
+            "filed": filed,
+            "val": val,
+            "form": form,
+            "accn": f"YTD{i}",
+            "duration_days": duration,
+        }
+        for i, (end, filed, val, form, duration) in enumerate(entries)
+    ]
+
+
+@pytest.fixture
+def aapl_ytd_parquet(tmp_path):
+    """AAPL FY2024 NetIncomeLoss + Revenues, post-2021 YTD-only tagging."""
+    records = _aapl_ytd_records("us-gaap:NetIncomeLoss", AAPL_FY24_NI) + _aapl_ytd_records(
+        "us-gaap:Revenues", AAPL_FY24_REV
+    )
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    return path
+
+
+def test_ttm_netincome_from_ytd_chain(aapl_ytd_parquet):
+    """AAPL FY2024 TTM NetIncomeLoss at 10-K date must equal FY value (~$93.7B)."""
+    q = PitQuery(aapl_ytd_parquet)
+    result = q.ttm("AAPL", "us-gaap:NetIncomeLoss")
+    last = result.iloc[-1]
+    # TTM = Q1_90d + (Q2_181d - Q1_90d) + (Q3_272d - Q2_181d) + (FY - Q3_272d) = FY.
+    assert last["ttm_val"] == pytest.approx(93736000000.0, rel=0.01)
+    assert last["n_periods"] == 4
+    assert last["filed"] == pd.Timestamp("2024-11-01")
+
+
+def test_ttm_revenues_from_ytd_chain(aapl_ytd_parquet):
+    """AAPL FY2024 TTM Revenues at 10-K date must equal FY value (~$391B)."""
+    q = PitQuery(aapl_ytd_parquet)
+    result = q.ttm("AAPL", "us-gaap:Revenues")
+    last = result.iloc[-1]
+    assert last["ttm_val"] == pytest.approx(391035000000.0, rel=0.01)
+
+
+def test_ttm_ytd_synthesis_no_lookahead(aapl_ytd_parquet):
+    """Synthetic quarters must not appear before both source YTDs are filed."""
+    q = PitQuery(aapl_ytd_parquet)
+    # Before Q2 YTD is filed (2024-05-03), only Q1_90d is known → no synth Q2_3m yet.
+    result = q.ttm("AAPL", "us-gaap:NetIncomeLoss", end_date="2024-04-30", min_periods=1)
+    # Only the 90d Q1 YTD is known → n_periods == 1 at the Q1 filing date.
+    assert not result.empty
+    assert (result["n_periods"] <= 1).all()
+
+
+def test_ttm_ytd_synthesis_after_two_ytds(aapl_ytd_parquet):
+    """After Q2 YTD is filed, synthetic Q2_3m appears → 2 periods available."""
+    q = PitQuery(aapl_ytd_parquet)
+    result = q.ttm("AAPL", "us-gaap:NetIncomeLoss", end_date="2024-05-03", min_periods=2)
+    last = result.iloc[-1]
+    # Q1_90d (33916) + synth Q2_3m (57564 − 33916 = 23648) = 57564.
+    assert last["ttm_val"] == pytest.approx(57564000000.0, rel=1e-6)
+    assert last["n_periods"] == 2
+
+
+def test_ttm_explicit_takes_precedence_over_synth(tmp_path):
+    """When both explicit 3-month and synthesized YTD-diff produce a row for the same
+    (end, filed), the explicit row wins (acceptance criterion)."""
+    records = [
+        # Discrete Q1 (90d)
+        {
+            "ticker": "X",
+            "concept": CONCEPT,
+            "start": "2024-01-01",
+            "end": "2024-03-31",
+            "filed": "2024-04-28",
+            "val": 100.0,
+            "form": "10-Q",
+            "accn": "Q1",
+            "duration_days": 91,
+        },
+        # Discrete Q2 (91d) — non-YTD, start at Q1 end. Value 200.
+        {
+            "ticker": "X",
+            "concept": CONCEPT,
+            "start": "2024-04-01",
+            "end": "2024-06-30",
+            "filed": "2024-07-28",
+            "val": 200.0,
+            "form": "10-Q",
+            "accn": "Q2_EXPLICIT",
+            "duration_days": 91,
+        },
+        # YTD_6m at same filed as explicit Q2 — creates a synth candidate at
+        # (end=2024-06-30, filed=2024-07-28) with val = 999 − 100 = 899.
+        {
+            "ticker": "X",
+            "concept": CONCEPT,
+            "start": "2024-01-01",
+            "end": "2024-06-30",
+            "filed": "2024-07-28",
+            "val": 999.0,
+            "form": "10-Q",
+            "accn": "YTD6",
+            "duration_days": 182,
+        },
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    q = PitQuery(path)
+    result = q.ttm("X", CONCEPT, min_periods=2)
+    last = result.iloc[-1]
+    # Explicit Q2 (200) must win, not synthesized (899). Expected TTM = 100 + 200 = 300.
+    assert last["ttm_val"] == pytest.approx(300.0)
+
+
+def test_ttm_no_regression_when_only_discrete_quarters(tmp_path):
+    """When a filer uses only discrete 3-month rows, YTD synthesis is a no-op and
+    TTM matches the pre-fix behavior."""
+    records = [
+        {
+            "ticker": "MSFT",
+            "concept": CONCEPT,
+            "start": "2019-07-01",
+            "end": "2019-09-30",
+            "filed": "2019-10-23",
+            "val": 100.0,
+            "form": "10-Q",
+            "accn": "D1",
+            "duration_days": 92,
+        },
+        {
+            "ticker": "MSFT",
+            "concept": CONCEPT,
+            "start": "2019-10-01",
+            "end": "2019-12-31",
+            "filed": "2020-01-29",
+            "val": 200.0,
+            "form": "10-Q",
+            "accn": "D2",
+            "duration_days": 92,
+        },
+        {
+            "ticker": "MSFT",
+            "concept": CONCEPT,
+            "start": "2020-01-01",
+            "end": "2020-03-31",
+            "filed": "2020-04-29",
+            "val": 300.0,
+            "form": "10-Q",
+            "accn": "D3",
+            "duration_days": 91,
+        },
+        {
+            "ticker": "MSFT",
+            "concept": CONCEPT,
+            "start": "2020-04-01",
+            "end": "2020-06-30",
+            "filed": "2020-07-22",
+            "val": 400.0,
+            "form": "10-Q",
+            "accn": "D4",
+            "duration_days": 91,
+        },
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    q = PitQuery(path)
+    result = q.ttm("MSFT", CONCEPT)
+    last = result.iloc[-1]
+    assert last["ttm_val"] == pytest.approx(1000.0)
+    assert last["n_periods"] == 4
+
+
+def test_ttm_cross_section_matches_ttm_on_ytd_universe(tmp_path):
+    """ttm_cross_section must return the same TTM as per-ticker ttm() for a mixed
+    universe — including AAPL-style YTD-only filers."""
+    records: list[dict] = []
+    # AAPL: YTD-only pattern (post-2021).
+    records.extend(_aapl_ytd_records("us-gaap:NetIncomeLoss", AAPL_FY24_NI))
+    # Four more tickers with discrete quarterly tagging.
+    fy_quarters = [
+        ("2023-03-31", "2023-04-28", 100.0, "10-Q", "2023-01-01"),
+        ("2023-06-30", "2023-07-28", 200.0, "10-Q", "2023-04-01"),
+        ("2023-09-30", "2023-10-28", 300.0, "10-Q", "2023-07-01"),
+        ("2023-12-31", "2024-02-02", 400.0, "10-Q", "2023-10-01"),
+    ]
+    for t in ("MSFT", "GOOG", "META", "NVDA"):
+        for i, (end, filed, val, form, start) in enumerate(fy_quarters):
+            records.append(
+                {
+                    "ticker": t,
+                    "concept": "us-gaap:NetIncomeLoss",
+                    "start": start,
+                    "end": end,
+                    "filed": filed,
+                    "val": val,
+                    "form": form,
+                    "accn": f"{t}{i}",
+                    "duration_days": 91,
+                }
+            )
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    q = PitQuery(path)
+
+    universe = ["AAPL", "MSFT", "GOOG", "META", "NVDA"]
+    xs = q.ttm_cross_section("us-gaap:NetIncomeLoss", "2024-12-01", tickers=universe, max_staleness_days=365)
+    for t in universe:
+        solo = q.ttm("AAPL" if t == "AAPL" else t, "us-gaap:NetIncomeLoss")
+        expected = solo.iloc[-1]["ttm_val"] if not solo.empty else float("nan")
+        row = xs[xs["ticker"] == t].iloc[0]
+        if pd.isna(expected):
+            assert pd.isna(row["ttm_val"])
+        else:
+            assert row["ttm_val"] == pytest.approx(expected, rel=1e-6)

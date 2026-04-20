@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from pitedgar.periods import is_annual, is_quarterly
+from pitedgar.periods import Q_MAX, Q_MIN, is_annual, is_quarterly
 
 
 def _snapshot_events(grp: pd.DataFrame) -> pd.DataFrame:
@@ -96,6 +96,110 @@ def _derive_q4_rows(df_q: pd.DataFrame, df_k: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["end", "filed", "val"])
 
 
+_SYNTH_COLS = ["end", "filed", "val", "duration_days", "form", "accn", "start"]
+
+
+def _derive_quarterly_from_ytd(df: pd.DataFrame) -> pd.DataFrame:
+    """Synthesize 3-month rows from consecutive YTD records sharing a `start`.
+
+    Some filers (notably AAPL post-2021 for NetIncomeLoss/Revenues) tag their
+    quarterly disclosures only as year-to-date cumulative values: Q1 is a 90-day
+    record, Q2 a 181-day record, Q3 a 272-day record, and the 10-K a 363-day
+    record — all sharing the same fiscal-year start. Without discrete 3-month
+    rows, ``_ttm_events`` has nothing to sum and ``ttm()`` falls back to summing
+    four Q1s from different years, producing an inflated TTM.
+
+    For each ``start`` group, this walks the sorted-by-end records and emits
+    a synthetic 3-month row for every consecutive YTD pair whose end-to-end
+    delta lands in the quarterly range:
+
+        Q2_3m = YTD_6m − YTD_3m     (quarters 181d, 90d → 91d synthetic)
+        Q3_3m = YTD_9m − YTD_6m     (quarters 272d, 181d → 91d synthetic)
+        Q4_3m = FY − YTD_9m         (quarters 363d, 272d → 91d synthetic)
+
+    Restatement handling: if either YTD end has multiple filings (different
+    `filed`/`val`), this emits one synthesized row per (prev_record, curr_record)
+    combination. The TTM state dict keyed by ``end`` absorbs duplicates at the
+    same (end, filed).
+
+    No look-ahead: synthesized `filed` = max(prev.filed, curr.filed), so the
+    row is only "known" after both YTD disclosures were filed.
+
+    Args:
+        df: rows for a single (ticker, concept). Must contain the columns
+            ``start``, ``end``, ``filed``, ``val``; ``form`` and ``accn`` are
+            used only for audit metadata on the emitted rows. Rows with a
+            missing ``start`` (e.g. balance-sheet instants) are ignored.
+
+    Returns DataFrame with columns: end, filed, val, duration_days, form,
+    accn, start. Empty when no YTD chain can be synthesized — including when
+    ``start`` is not present on the input.
+    """
+    empty = pd.DataFrame(columns=_SYNTH_COLS)
+    if df.empty or "start" not in df.columns:
+        return empty
+
+    ytd = df[df["start"].notna()]
+    if ytd.empty:
+        return empty
+
+    rows: list[dict] = []
+    for _, grp in ytd.groupby("start", sort=True):
+        ends = sorted(grp["end"].unique())
+        if len(ends) < 2:
+            continue
+        for i in range(1, len(ends)):
+            prev_end, curr_end = ends[i - 1], ends[i]
+            duration = (curr_end - prev_end).days
+            if duration < Q_MIN or duration > Q_MAX:
+                continue
+            prev_rows = grp[grp["end"] == prev_end]
+            curr_rows = grp[grp["end"] == curr_end]
+            for _, p in prev_rows.iterrows():
+                for _, c in curr_rows.iterrows():
+                    filed = p["filed"] if p["filed"] >= c["filed"] else c["filed"]
+                    src_accn = c.get("accn", "")
+                    src_form = c.get("form", "")
+                    rows.append(
+                        {
+                            "end": curr_end,
+                            "filed": filed,
+                            "val": c["val"] - p["val"],
+                            "duration_days": duration,
+                            "form": src_form,
+                            "accn": f"{src_accn}:DERIVED_YTD_DIFF",
+                            "start": prev_end,
+                        }
+                    )
+    return pd.DataFrame(rows, columns=_SYNTH_COLS) if rows else empty
+
+
+def _combine_quarterly_sources(
+    sub_all: pd.DataFrame,
+    quarterly_mask: pd.Series,
+) -> pd.DataFrame:
+    """Return the full 3-month row set for a (ticker, concept): explicit ∪ synthesized.
+
+    Explicit quarterly rows (those with ``is_quarterly(duration_days)``) take
+    precedence over synthesized ones at the same ``(end, filed)``. Returned
+    DataFrame has columns ``end, filed, val`` — the minimum needed by
+    ``_ttm_events`` and ``_derive_q4_rows``.
+    """
+    explicit = sub_all.loc[quarterly_mask]
+    synth = _derive_quarterly_from_ytd(sub_all)
+
+    if synth.empty:
+        return explicit[["end", "filed", "val"]].copy()
+
+    # Concat synthesized first, explicit second → drop_duplicates keep='last'
+    # so explicit wins when both are present for the same (end, filed).
+    synth_keep = synth[["end", "filed", "val"]]
+    explicit_keep = explicit[["end", "filed", "val"]]
+    combined = pd.concat([synth_keep, explicit_keep], ignore_index=True)
+    combined = combined.drop_duplicates(subset=["end", "filed"], keep="last")
+    return combined
+
+
 def _ttm_events(grp: pd.DataFrame, min_periods: int = 4) -> pd.DataFrame:
     """Compute TTM step-function events for one ticker from sorted 10-Q rows.
 
@@ -137,6 +241,10 @@ class PitQuery:
         self.data = pd.read_parquet(parquet_path)
         self.data["filed"] = pd.to_datetime(self.data["filed"], errors="coerce")
         self.data["end"] = pd.to_datetime(self.data["end"], errors="coerce")
+        # `start` is required by YTD-chain synthesis in ttm(); older fixtures and
+        # legacy parquets may lack it, in which case synthesis silently no-ops.
+        if "start" in self.data.columns:
+            self.data["start"] = pd.to_datetime(self.data["start"], errors="coerce")
         # Ensure duration_days exists for period classification. The parser always
         # writes this column; for test fixtures or legacy parquets without it,
         # infer from form (10-Q → 91, 10-K → 365) as a safe approximation.
@@ -297,11 +405,14 @@ class PitQuery:
         Returns DataFrame with columns: ticker, concept, filed, ttm_val, n_periods
         """
         base_mask = (self.data["ticker"] == ticker) & (self.data["concept"] == concept)
-        # Use duration_days to identify quarterly periods (60–105 days), regardless
-        # of form. Some companies (e.g. JNJ) report discrete quarterly values only
-        # inside 10-K filings as comparative data; form='10-Q' would miss them.
-        sub = self.data.loc[base_mask & is_quarterly(self.data["duration_days"])].sort_values("filed")
-        sub_k = self.data.loc[base_mask & is_annual(self.data["duration_days"], self.data["form"])]
+        sub_all = self.data.loc[base_mask]
+        sub_k = sub_all.loc[is_annual(sub_all["duration_days"], sub_all["form"])]
+
+        # Union explicit 3-month rows (duration_days 60–105, regardless of form —
+        # some companies like JNJ report quarterly breakdowns inside 10-K filings)
+        # with synthesized 3-month rows from consecutive YTD pairs (AAPL post-2021
+        # pattern: Q2/Q3 tagged only as YTD, no discrete 3-month disclosure).
+        sub = _combine_quarterly_sources(sub_all, is_quarterly(sub_all["duration_days"])).sort_values("filed")
 
         if sub.empty:
             return pd.DataFrame(columns=["ticker", "concept", "filed", "ttm_val", "n_periods"])
@@ -311,7 +422,7 @@ class PitQuery:
         # are not falsely nullified by the staleness check.
         q4_rows = _derive_q4_rows(sub, sub_k)
         if not q4_rows.empty:
-            sub = pd.concat([sub[["end", "filed", "val"]], q4_rows], ignore_index=True).sort_values("filed")
+            sub = pd.concat([sub, q4_rows], ignore_index=True).sort_values("filed")
 
         result = _ttm_events(sub, min_periods=min_periods)
         if result.empty:
@@ -387,31 +498,26 @@ class PitQuery:
         concept_mask = self.data["concept"] == concept
         if tickers is not None:
             concept_mask &= self.data["ticker"].isin(universe)
-        df_q = self.data.loc[concept_mask & is_quarterly(self.data["duration_days"])].sort_values(
-            ["ticker", "filed"]
-        )
-        df_k = self.data.loc[concept_mask & is_annual(self.data["duration_days"], self.data["form"])]
-
-        # Group 10-K rows by ticker for O(1) lookup inside the per-ticker loop.
-        k_by_ticker: dict = {}
-        if not df_k.empty:
-            for t, g in df_k.groupby("ticker", sort=False):
-                k_by_ticker[t] = g
+        df_all = self.data.loc[concept_mask].sort_values(["ticker", "filed"])
 
         # Compute TTM events for all tickers in one grouped pass.
-        # For tickers whose Q4 is only in the 10-K (e.g. December-FY companies),
-        # inject a synthetic Q4 = Annual − Q1 − Q2 − Q3 before running _ttm_events.
+        # Per ticker: build the unified 3-month row set (explicit ∪ YTD-synthesized),
+        # then inject a synthetic Q4 from 10-K when needed. The YTD step covers
+        # AAPL post-2021 (Q2/Q3 tagged only as YTD); the 10-K step covers December-FY
+        # companies whose Q4 never appears in a 10-Q.
         ttm_frames: list[pd.DataFrame] = []
         tickers_with_data: set = set()
-        for ticker, grp in df_q.groupby("ticker", sort=False):
-            grp_k = k_by_ticker.get(ticker, pd.DataFrame())
-            q4_rows = _derive_q4_rows(grp, grp_k)
+        q_mask = is_quarterly(df_all["duration_days"])
+        k_mask = is_annual(df_all["duration_days"], df_all["form"])
+        for ticker, grp_all in df_all.groupby("ticker", sort=False):
+            grp_q_mask = q_mask.loc[grp_all.index]
+            grp_k = grp_all.loc[k_mask.loc[grp_all.index]]
+            combined = _combine_quarterly_sources(grp_all, grp_q_mask).sort_values("filed")
+            if combined.empty:
+                continue
+            q4_rows = _derive_q4_rows(combined, grp_k)
             if not q4_rows.empty:
-                combined = pd.concat([grp[["end", "filed", "val"]], q4_rows], ignore_index=True).sort_values(
-                    "filed"
-                )
-            else:
-                combined = grp
+                combined = pd.concat([combined, q4_rows], ignore_index=True).sort_values("filed")
             events = _ttm_events(combined, min_periods=min_periods)
             if not events.empty:
                 events["ticker"] = ticker

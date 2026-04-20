@@ -212,7 +212,7 @@ def parse_company(
 
 
 def _parse_one_for_pool(
-    args: tuple[str, str, list[str], Path, list[str]],
+    args: tuple[str, str, list[str] | None, Path, list[str]],
 ) -> tuple[str, pd.DataFrame]:
     """Top-level helper for ProcessPoolExecutor (must be picklable, hence not a closure).
 
