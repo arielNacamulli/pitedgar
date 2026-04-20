@@ -724,6 +724,128 @@ def test_as_of_10ka_supersedes_10k(tmp_path):
     assert after.iloc[0]["form"] == "10-K/A"
 
 
+# ---------------------------------------------------------------------------
+# age_days surfacing (v0.3.0)
+# ---------------------------------------------------------------------------
+
+
+def test_as_of_age_days_present_and_correct(parquet_path):
+    """as_of always returns age_days = (as_of_date - filed) in days."""
+    q = PitQuery(parquet_path)
+    # AAPL FY2022 10-K filed 2023-02-02; as_of 2023-06-01 → 119 days.
+    result = q.as_of("AAPL", CONCEPT, "2023-06-01")
+    assert "age_days" in result.columns
+    row = result.iloc[0]
+    expected = (pd.Timestamp("2023-06-01") - pd.Timestamp("2023-02-02")).days
+    assert int(row["age_days"]) == expected
+
+
+def test_as_of_default_does_not_nullify_stale(parquet_path):
+    """Default max_staleness_days=None must NOT nullify; surfaces age_days instead."""
+    q = PitQuery(parquet_path)
+    # MSFT last filed 2022-07-28; query date 2027-07-28 → ~5 years old (~1826 days).
+    result = q.as_of("MSFT", CONCEPT, "2027-07-28")
+    row = result.iloc[0]
+    assert not pd.isna(row["val"])
+    assert row["val"] == pytest.approx(198270000000.0)
+    assert int(row["age_days"]) == pytest.approx(1826, abs=2)
+
+
+def test_as_of_explicit_staleness_still_nullifies(parquet_path):
+    """Passing max_staleness_days=100 must still nullify (back-compat)."""
+    q = PitQuery(parquet_path)
+    result = q.as_of("MSFT", CONCEPT, "2024-01-01", max_staleness_days=100)
+    row = result.iloc[0]
+    assert pd.isna(row["val"])
+    # age_days is still surfaced even when nullified.
+    assert "age_days" in result.columns
+    assert not pd.isna(row["age_days"])
+
+
+def test_as_of_missing_ticker_age_days_na(parquet_path):
+    """Missing tickers get NA age_days (not 0)."""
+    q = PitQuery(parquet_path)
+    result = q.as_of("FAKE", CONCEPT, "2023-01-01")
+    assert "age_days" in result.columns
+    assert pd.isna(result.iloc[0]["age_days"])
+
+
+def test_cross_section_age_days_present_and_correct(parquet_path):
+    """cross_section always returns age_days."""
+    q = PitQuery(parquet_path)
+    xs = q.cross_section(CONCEPT, "2023-06-01", tickers=["AAPL"])
+    assert "age_days" in xs.columns
+    row = xs.iloc[0]
+    expected = (pd.Timestamp("2023-06-01") - row["filed"]).days
+    assert int(row["age_days"]) == expected
+
+
+def test_cross_section_default_does_not_nullify_stale(parquet_path):
+    """Default max_staleness_days=None must NOT nullify in cross_section."""
+    q = PitQuery(parquet_path)
+    xs = q.cross_section(CONCEPT, "2027-07-28", tickers=["MSFT"])
+    row = xs.iloc[0]
+    assert not pd.isna(row["val"])
+    assert row["val"] == pytest.approx(198270000000.0)
+    assert int(row["age_days"]) == pytest.approx(1826, abs=2)
+
+
+def test_cross_section_explicit_staleness_still_nullifies(parquet_path):
+    """Passing max_staleness_days=100 must still nullify in cross_section."""
+    q = PitQuery(parquet_path)
+    xs = q.cross_section(CONCEPT, "2024-01-01", tickers=["MSFT"], max_staleness_days=100)
+    assert pd.isna(xs.iloc[0]["val"])
+    assert "age_days" in xs.columns
+
+
+def test_cross_section_missing_ticker_age_days_na(parquet_path):
+    """Missing tickers get NA age_days (not 0) in cross_section."""
+    q = PitQuery(parquet_path)
+    xs = q.cross_section(CONCEPT, "2023-01-01", tickers=["FAKE"])
+    assert "age_days" in xs.columns
+    assert pd.isna(xs.iloc[0]["age_days"])
+
+
+def test_ttm_cross_section_age_days_present_and_correct(ttm_parquet_path):
+    """ttm_cross_section always returns age_days."""
+    q = PitQuery(ttm_parquet_path)
+    result = q.ttm_cross_section(CONCEPT, "2023-06-01")
+    assert "age_days" in result.columns
+    row = result.iloc[0]
+    expected = (pd.Timestamp("2023-06-01") - row["filed"]).days
+    assert int(row["age_days"]) == expected
+
+
+def test_ttm_cross_section_default_does_not_nullify_stale(restatement_parquet_path):
+    """Default max_staleness_days=None must NOT nullify TTM."""
+    q = PitQuery(restatement_parquet_path)
+    # last filing was 2023-03-01 → 2025-01-01 is ~671 days later, well past 100 days.
+    result = q.ttm_cross_section(CONCEPT, "2025-01-01")
+    row = result.iloc[0]
+    assert not pd.isna(row["ttm_val"])
+    assert row["n_periods"] == 4
+    assert int(row["age_days"]) > 100
+
+
+def test_ttm_cross_section_explicit_staleness_still_nullifies(restatement_parquet_path):
+    """Passing max_staleness_days=100 must still nullify ttm_cross_section."""
+    q = PitQuery(restatement_parquet_path)
+    result = q.ttm_cross_section(CONCEPT, "2025-01-01", max_staleness_days=100)
+    row = result.iloc[0]
+    assert pd.isna(row["ttm_val"])
+    assert row["n_periods"] == 0
+    assert "age_days" in result.columns
+
+
+def test_ttm_cross_section_missing_ticker_age_days_na(ttm_parquet_path):
+    """Missing tickers get NA age_days (not 0) in ttm_cross_section."""
+    q = PitQuery(ttm_parquet_path)
+    result = q.ttm_cross_section(CONCEPT, "2023-06-01", tickers=["AAPL", "MSFT"])
+    msft = result[result["ticker"] == "MSFT"].iloc[0]
+    assert "age_days" in result.columns
+    assert pd.isna(msft["age_days"])
+
+
 def test_history_returns_latest_filed_per_end(tmp_path):
     """history() must return the restated (latest-filed) value for each period end."""
     records = [
