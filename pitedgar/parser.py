@@ -82,53 +82,88 @@ def parse_company(
             alias_lookup[canonical].append(alias)
 
     for concept_full in concepts:
-        # Try the canonical concept first, then any aliases (e.g. post-ASC 606 revenue tag).
-        # Store all rows under the canonical name regardless of which tag matched.
+        # Union data from the canonical concept AND every alias — a filer may
+        # report different periods under different tags (e.g. pre-ASC 606 years
+        # under ``SalesRevenueNet`` and post-ASC 606 years under
+        # ``RevenueFromContractWithCustomerExcludingAssessedTax``), so stopping at
+        # the first tag with data would silently drop all the other periods.
+        #
+        # Canonical precedence: when the same ``(end, filed, form, accn)`` key is
+        # present under multiple tags, the canonical value wins. The candidate
+        # list places canonical first and we dedup ``keep='first'`` below.
         candidates = [concept_full, *alias_lookup.get(concept_full, [])]
-        unit_entries: list[dict] | None = None
         canonical_short = concept_full.split(":", 1)[-1]
 
+        candidate_rows: list[dict] = []
         for candidate_full in candidates:
             concept_short = candidate_full.split(":", 1)[-1]
             concept_data = usgaap.get(concept_short)
             if concept_data is None:
                 continue
             units_dict: dict = concept_data.get("units", {})
+            # Pick the preferred unit per candidate (USD vs shares). This runs
+            # independently for each candidate so e.g. a share-concept alias
+            # reported in "shares" is still picked up alongside the canonical.
+            unit_entries: list[dict] | None = None
             for unit_key in _preferred_units(canonical_short):
                 if unit_key in units_dict:
                     unit_entries = units_dict[unit_key]
                     break
-            if unit_entries:
-                break
+            if not unit_entries:
+                continue
 
-        if not unit_entries:
+            for entry in unit_entries:
+                form = entry.get("form", "")
+                if form not in forms:
+                    continue
+                start = entry.get("start")
+                end = entry.get("end")
+                filed = entry.get("filed")
+                val = entry.get("val")
+                accn = entry.get("accn", "")
+                if end is None or filed is None or val is None:
+                    continue
+                candidate_rows.append(
+                    {
+                        "cik": cik_padded,
+                        "concept": concept_full,
+                        "start": start,
+                        "end": end,
+                        "filed": filed,
+                        "val": float(val),
+                        "form": form,
+                        "accn": accn,
+                    }
+                )
+
+        if not candidate_rows:
             # Concept reported neither USD nor shares (e.g. pure/EUR/etc.) — skip
             # silently to keep the parquet schema homogeneous.
             continue
 
-        for entry in unit_entries:
-            form = entry.get("form", "")
-            if form not in forms:
-                continue
-            start = entry.get("start")
-            end = entry.get("end")
-            filed = entry.get("filed")
-            val = entry.get("val")
-            accn = entry.get("accn", "")
-            if end is None or filed is None or val is None:
-                continue
-            rows.append(
-                {
-                    "cik": cik_padded,
-                    "concept": concept_full,
-                    "start": start,
-                    "end": end,
-                    "filed": filed,
-                    "val": float(val),
-                    "form": form,
-                    "accn": accn,
-                }
-            )
+        # Dedup across candidates by (end, filed, form). Because the canonical
+        # candidate is processed first, the first-seen row wins — preserving
+        # canonical precedence when a filer reports the same reporting instance
+        # (same period, same filing date, same form) under both canonical and
+        # alias tags. Different ``accn`` values at the same (end, filed, form)
+        # cannot legitimately coexist for one company, so excluding accn from
+        # the dedup key is safe and also matches the legacy "canonical wins"
+        # behaviour exercised by ``test_parse_company_canonical_wins_over_alias``.
+        # This dedup only collapses overlaps between canonical and alias tags;
+        # non-overlapping periods (e.g. pre-ASC 606 years under one tag and
+        # post-ASC 606 years under another) are preserved via the union.
+        if len(candidates) > 1:
+            seen: set[tuple] = set()
+            deduped: list[dict] = []
+            for row in candidate_rows:
+                key = (row["end"], row["filed"], row["form"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.append(row)
+            candidate_rows = deduped
+
+        rows.extend(candidate_rows)
 
     if not rows:
         return pd.DataFrame()
