@@ -76,13 +76,21 @@ def cmd_fetch(force: bool, identity: str, data_dir: str) -> None:
 @click.option(
     "--force", is_flag=True, default=False, help="Re-parse even if pit_financials.parquet already exists."
 )
-def cmd_build(identity: str, data_dir: str, force: bool) -> None:
+@click.option(
+    "--workers",
+    "-j",
+    "workers",
+    type=int,
+    default=None,
+    help="Number of worker processes for parallel parsing. Default: all CPU cores. Use 1 for serial.",
+)
+def cmd_build(identity: str, data_dir: str, force: bool, workers: int | None) -> None:
     """Parse all local JSON facts into the master PIT parquet."""
     config = _build_config(identity, data_dir)
     cik_map_path = config.data_dir / "ticker_cik_map.parquet"
     _require_file(cik_map_path, hint="Run `pitedgar map` first to create it.")
     cik_map = pd.read_parquet(cik_map_path)
-    master = parse_all(config, cik_map, force=force)
+    master = parse_all(config, cik_map, force=force, n_workers=workers)
     click.echo(f"Built master parquet: {len(master):,} rows")
 
 

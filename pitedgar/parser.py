@@ -1,6 +1,8 @@
 """Step 3: parse local JSON facts into a point-in-time parquet master."""
 
 import json
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import pandas as pd
@@ -155,13 +157,43 @@ def parse_company(
     return df
 
 
-def parse_all(config: PitEdgarConfig, cik_map: pd.DataFrame, force: bool = False) -> pd.DataFrame:
+def _parse_one_for_pool(
+    args: tuple[str, str, list[str], Path, list[str]],
+) -> tuple[str, pd.DataFrame]:
+    """Top-level helper for ProcessPoolExecutor (must be picklable, hence not a closure).
+
+    Args:
+        args: tuple of (ticker, cik_padded, concepts, facts_dir, forms).
+
+    Returns:
+        (ticker, parsed DataFrame). DataFrame may be empty.
+    """
+    ticker, cik_padded, concepts, facts_dir, forms = args
+    df = parse_company(
+        cik_padded=cik_padded,
+        concepts=concepts,
+        facts_dir=facts_dir,
+        forms=forms,
+    )
+    return ticker, df
+
+
+def parse_all(
+    config: PitEdgarConfig,
+    cik_map: pd.DataFrame,
+    force: bool = False,
+    n_workers: int | None = None,
+) -> pd.DataFrame:
     """Parse all companies in cik_map into a single PIT master parquet.
 
     Args:
-        config:  pipeline configuration.
-        cik_map: DataFrame indexed by ticker with a 'cik' column.
-        force:   re-parse even if pit_financials.parquet already exists.
+        config:    pipeline configuration.
+        cik_map:   DataFrame indexed by ticker with a 'cik' column.
+        force:     re-parse even if pit_financials.parquet already exists.
+        n_workers: number of worker processes for parallel parsing.
+                   ``None`` (default) uses ``os.cpu_count()`` (or 1 if unavailable).
+                   ``1`` runs serially, skipping the process pool entirely — useful
+                   for debugging (cleaner stack traces) and single-core environments.
 
     Returns:
         Master DataFrame with an additional 'ticker' column.
@@ -173,20 +205,43 @@ def parse_all(config: PitEdgarConfig, cik_map: pd.DataFrame, force: bool = False
         logger.info(f"Parquet already exists at {out_path}, skipping parse (use force=True to override).")
         return pd.read_parquet(out_path)
 
+    if n_workers is None:
+        n_workers = os.cpu_count() or 1
+    if n_workers < 1:
+        raise ValueError(f"n_workers must be >= 1, got {n_workers}")
+
     all_frames: list[pd.DataFrame] = []
 
-    for ticker, row in tqdm(cik_map.iterrows(), total=len(cik_map), desc="Parsing"):
-        cik_padded = str(row["cik"])
-        df = parse_company(
-            cik_padded=cik_padded,
-            concepts=config.concepts,
-            facts_dir=config.facts_dir,
-            forms=config.forms,
-        )
-        if df.empty:
-            continue
-        df.insert(0, "ticker", str(ticker))
-        all_frames.append(df)
+    if n_workers == 1:
+        # Serial path: no pool overhead, clean stack traces for debugging.
+        for ticker, row in tqdm(cik_map.iterrows(), total=len(cik_map), desc="Parsing"):
+            cik_padded = str(row["cik"])
+            df = parse_company(
+                cik_padded=cik_padded,
+                concepts=config.concepts,
+                facts_dir=config.facts_dir,
+                forms=config.forms,
+            )
+            if df.empty:
+                continue
+            df.insert(0, "ticker", str(ticker))
+            all_frames.append(df)
+    else:
+        # Parallel path: fan out across processes — JSON parsing is CPU-bound.
+        tasks = [
+            (str(ticker), str(row["cik"]), config.concepts, config.facts_dir, config.forms)
+            for ticker, row in cik_map.iterrows()
+        ]
+        with ProcessPoolExecutor(max_workers=n_workers) as pool:
+            futures = [pool.submit(_parse_one_for_pool, task) for task in tasks]
+            for future in tqdm(
+                as_completed(futures), total=len(futures), desc=f"Parsing ({n_workers} workers)"
+            ):
+                ticker, df = future.result()
+                if df.empty:
+                    continue
+                df.insert(0, "ticker", ticker)
+                all_frames.append(df)
 
     if not all_frames:
         logger.warning("No data parsed — check facts_dir and CIK map.")

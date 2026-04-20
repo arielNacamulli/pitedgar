@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-04-18
+
+### Added
+- **`n_workers` parameter on `parse_all`**: parallelizes JSON parsing across worker processes via `concurrent.futures.ProcessPoolExecutor`. Default `None` uses `os.cpu_count()`; `n_workers=1` keeps the legacy serial loop for debugging and single-core environments.
+- **`--workers` / `-j` flag on `pitedgar build`**: surfaces the new parallelism on the CLI (e.g. `pitedgar build -j 8`).
+
+### Changed
+- **`parse_all` is parallel by default**: JSON parsing is CPU-bound, so fanning out across all cores yields a roughly 5–10x speedup on a typical laptop for ~500 companies. Pass `n_workers=1` (or `--workers 1`) to restore the old serial behavior.
+
 ## [0.2.7] - 2026-04-18
 
 ### Added
