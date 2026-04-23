@@ -235,10 +235,41 @@ def _ttm_events(grp: pd.DataFrame, min_periods: int = 4) -> pd.DataFrame:
 
 
 class PitQuery:
-    """Query point-in-time financial data from a master parquet file."""
+    """Query point-in-time financial data from a master parquet file.
 
-    def __init__(self, parquet_path: Path) -> None:
-        self.data = pd.read_parquet(parquet_path)
+    Memory footprint: by default the full parquet is loaded into RAM.  For
+    R3000-scale parquets (all us-gaap concepts, 10 years) this can be multiple
+    GB.  Pass one or more of the optional filter kwargs to enable pyarrow
+    predicate pushdown and load only the slice you need — typically cutting peak
+    memory from several GB to a few hundred MB.
+
+    Args:
+        parquet_path: path to the master ``pit_financials.parquet``.
+        tickers:      load only rows whose ``ticker`` is in this list.
+                      Tickers are upcased automatically.
+        concepts:     load only rows whose ``concept`` is in this list.
+        since:        load only rows whose ``filed`` date is >= this value
+                      (ISO string or ``pd.Timestamp``).
+    """
+
+    def __init__(
+        self,
+        parquet_path: Path,
+        tickers: list[str] | None = None,
+        concepts: list[str] | None = None,
+        since: str | pd.Timestamp | None = None,
+    ) -> None:
+        filters: list[tuple] = []
+        if tickers:
+            filters.append(("ticker", "in", [t.upper() for t in tickers]))
+        if concepts:
+            filters.append(("concept", "in", concepts))
+        if since is not None:
+            # Normalise to an ISO date string so the filter works regardless of
+            # whether the parquet stores `filed` as string or timestamp dtype.
+            since_str = pd.Timestamp(since).strftime("%Y-%m-%d")
+            filters.append(("filed", ">=", since_str))
+        self.data = pd.read_parquet(parquet_path, filters=filters or None)
         self.data["filed"] = pd.to_datetime(self.data["filed"], errors="coerce")
         self.data["end"] = pd.to_datetime(self.data["end"], errors="coerce")
         # `start` is required by YTD-chain synthesis in ttm(); older fixtures and
