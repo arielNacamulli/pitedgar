@@ -4,6 +4,9 @@ These cover error paths that previously tracebacked with raw pandas/OS exception
 missing input files, unreadable tickers lists, invalid dates, missing build artifacts.
 """
 
+import io
+import json
+
 import pandas as pd
 import pytest
 from click.testing import CliRunner
@@ -175,6 +178,109 @@ def test_query_happy_path(runner, tmp_path):
     )
     assert result.exit_code == 0, result.output
     assert "AAPL" in result.output
+
+
+def _make_query_parquet(tmp_path):
+    """Create a minimal pit_financials.parquet for query tests."""
+    parquet = tmp_path / "pit_financials.parquet"
+    pd.DataFrame(
+        {
+            "ticker": ["AAPL"],
+            "concept": ["us-gaap:Revenues"],
+            "end": [pd.Timestamp("2022-12-31")],
+            "filed": [pd.Timestamp("2023-02-01")],
+            "val": [1.0e9],
+            "form": ["10-K"],
+            "duration_days": [365],
+        }
+    ).to_parquet(parquet)
+    return parquet
+
+
+def test_query_format_json(runner, tmp_path):
+    """--format json produces a valid JSON array of dicts with expected keys."""
+    _make_query_parquet(tmp_path)
+    result = runner.invoke(
+        cli,
+        [
+            "query",
+            "--ticker", "AAPL",
+            "--concept", "us-gaap:Revenues",
+            "--as-of", "2023-02-15",
+            "--data-dir", str(tmp_path),
+            "--format", "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    parsed = json.loads(result.output)
+    assert isinstance(parsed, list)
+    assert len(parsed) > 0
+    assert "ticker" in parsed[0]
+    assert "val" in parsed[0]
+
+
+def test_query_format_csv(runner, tmp_path):
+    """--format csv produces a parseable CSV with the expected columns."""
+    _make_query_parquet(tmp_path)
+    result = runner.invoke(
+        cli,
+        [
+            "query",
+            "--ticker", "AAPL",
+            "--concept", "us-gaap:Revenues",
+            "--as-of", "2023-02-15",
+            "--data-dir", str(tmp_path),
+            "--format", "csv",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    df = pd.read_csv(io.StringIO(result.output))
+    assert "ticker" in df.columns
+    assert "val" in df.columns
+
+
+def test_query_format_default_is_table(runner, tmp_path):
+    """Default output format remains 'table' (to_string) for back-compat."""
+    _make_query_parquet(tmp_path)
+    result = runner.invoke(
+        cli,
+        [
+            "query",
+            "--ticker", "AAPL",
+            "--concept", "us-gaap:Revenues",
+            "--as-of", "2023-02-15",
+            "--data-dir", str(tmp_path),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    # to_string output should not start with '[' (JSON) or end with a bare newline after CSV header
+    assert "AAPL" in result.output
+    # Ensure it is NOT valid JSON (table format is not JSON)
+    try:
+        json.loads(result.output)
+        is_json = True
+    except ValueError:
+        is_json = False
+    assert not is_json
+
+
+def test_query_format_case_insensitive(runner, tmp_path):
+    """--format JSON (uppercase) is accepted and emits valid JSON."""
+    _make_query_parquet(tmp_path)
+    result = runner.invoke(
+        cli,
+        [
+            "query",
+            "--ticker", "AAPL",
+            "--concept", "us-gaap:Revenues",
+            "--as-of", "2023-02-15",
+            "--data-dir", str(tmp_path),
+            "--format", "JSON",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    parsed = json.loads(result.output)
+    assert isinstance(parsed, list)
 
 
 def test_map_happy_path_with_stubbed_edgar(runner, tmp_path, mocker):
