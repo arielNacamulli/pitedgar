@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0.dev0] - unreleased
+
+Adversarial-review hardening pass covering correctness (PIT / scale / aliases),
+security (zip-slip, zip-bomb, integrity, retry), and robustness (mapping retry,
+concept validation, contiguity checks). Individual fixes track GitHub issues
+#12–#38; each fix lands on its own `claude/v0.4/fix-<N>` sub-branch and merges
+into `claude/v0.4-adversarial-fixes`. CHANGELOG entries for each fix are added
+at integration time.
+
 ## [0.3.2] - 2026-04-21
 
 ### Fixed
