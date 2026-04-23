@@ -1,10 +1,13 @@
 """PIT query API over the master parquet."""
 
+import logging
 from pathlib import Path
 
 import pandas as pd
 
 from pitedgar.periods import Q_MAX, Q_MIN, is_annual, is_quarterly
+
+logger = logging.getLogger(__name__)
 
 
 def _snapshot_events(grp: pd.DataFrame) -> pd.DataFrame:
@@ -67,13 +70,26 @@ def _derive_q4_rows(df_q: pd.DataFrame, df_k: pd.DataFrame) -> pd.DataFrame:
     if df_k.empty or df_q.empty:
         return pd.DataFrame(columns=["end", "filed", "val"])
 
+    # Detect whether the 10-K rows carry a `start` column (parser may have
+    # written it; older fixtures / legacy parquets may not).
+    k_has_start = "start" in df_k.columns
+
     rows = []
     for _, k_row in df_k.iterrows():
         fy_end = k_row["end"]
         k_filed = k_row["filed"]
         annual_val = k_row["val"]
 
-        fy_start = fy_end - pd.Timedelta(days=366)
+        # Prefer the 10-K's own fiscal-year start when available.  This is the
+        # critical fix for 52/53-week fiscal calendars (Target, Walmart, Costco):
+        # adjacent fiscal years can otherwise have Q4 end-dates that fall within
+        # a 366-day window of the following fiscal year, inflating the count.
+        # Fall back to a conservative 355-day window (less than 366 to avoid the
+        # cross-year bleed) when the start column is missing or NaT.
+        if k_has_start and pd.notna(k_row["start"]):
+            fy_start = k_row["start"]
+        else:
+            fy_start = fy_end - pd.Timedelta(days=355)
 
         # 10-Q quarters within this fiscal year that were filed by the 10-K date.
         q_in_year = df_q[
@@ -90,7 +106,55 @@ def _derive_q4_rows(df_q: pd.DataFrame, df_k: pd.DataFrame) -> pd.DataFrame:
             # Require all three quarters present to safely isolate Q4.
             continue
 
+        # --- Structural validation of the 3 matched quarters ---
+        q_ends = q_in_year.sort_values("end")["end"].tolist()
+
+        # 1. Ends must be strictly monotonically increasing.
+        if q_ends[0] >= q_ends[1] or q_ends[1] >= q_ends[2]:
+            logger.debug(
+                "_derive_q4_rows: skipping fy_end=%s — quarter ends not monotonically increasing: %s",
+                fy_end.date(),
+                [e.date() for e in q_ends],
+            )
+            continue
+
+        # 2. Cumulative span (Q1_end → Q3_end) must fall in [150, 280] days.
+        span = (q_ends[2] - q_ends[0]).days
+        if not (150 <= span <= 280):
+            logger.debug(
+                "_derive_q4_rows: skipping fy_end=%s — Q1→Q3 span %d days outside [150, 280]",
+                fy_end.date(),
+                span,
+            )
+            continue
+
+        # 3. Each successive gap must be within the quarterly range [Q_MIN, Q_MAX].
+        gap_01 = (q_ends[1] - q_ends[0]).days
+        gap_12 = (q_ends[2] - q_ends[1]).days
+        if not (Q_MIN <= gap_01 <= Q_MAX) or not (Q_MIN <= gap_12 <= Q_MAX):
+            logger.debug(
+                "_derive_q4_rows: skipping fy_end=%s — quarter gaps %d/%d outside [%d, %d]",
+                fy_end.date(),
+                gap_01,
+                gap_12,
+                Q_MIN,
+                Q_MAX,
+            )
+            continue
+
         q4_val = annual_val - q_in_year["val"].sum()
+
+        # 4. Sanity check: |Q4| must not exceed 2× the annual value.
+        if abs(q4_val) > abs(annual_val) * 2:
+            logger.warning(
+                "_derive_q4_rows: skipping fy_end=%s — synthetic Q4 value %g seems absurd "
+                "(annual=%g); likely wrong quarters matched",
+                fy_end.date(),
+                q4_val,
+                annual_val,
+            )
+            continue
+
         rows.append({"end": fy_end, "filed": k_filed, "val": q4_val})
 
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["end", "filed", "val"])
