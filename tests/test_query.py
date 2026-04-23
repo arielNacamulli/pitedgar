@@ -2,7 +2,9 @@
 
 import pandas as pd
 import pytest
+from loguru import logger
 
+import pitedgar.query as _query_module
 from pitedgar.query import PitQuery
 
 CONCEPT = "us-gaap:Revenues"
@@ -1229,3 +1231,82 @@ def test_ttm_cross_section_matches_ttm_on_ytd_universe(tmp_path):
             assert pd.isna(row["ttm_val"])
         else:
             assert row["ttm_val"] == pytest.approx(expected, rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Future-date warnings (#34)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=False)
+def reset_future_warned(monkeypatch):
+    """Reset the module-level dedup set between tests."""
+    monkeypatch.setattr(_query_module, "_FUTURE_WARNED", set())
+
+
+def test_as_of_warns_on_future_date(parquet_path, reset_future_warned):
+    """as_of with a far-future date should emit a warning containing 'future'."""
+    q = PitQuery(parquet_path)
+    messages: list[str] = []
+
+    def _sink(msg):
+        messages.append(msg)
+
+    sink_id = logger.add(_sink, format="{message}", level="WARNING")
+    try:
+        q.as_of("AAPL", CONCEPT, "2099-01-01")
+    finally:
+        logger.remove(sink_id)
+
+    assert any("future" in m for m in messages), f"No 'future' warning found in: {messages}"
+
+
+def test_cross_section_warns_on_future_date(parquet_path, reset_future_warned):
+    """cross_section with a future date should emit a warning containing 'future'."""
+    q = PitQuery(parquet_path)
+    messages: list[str] = []
+
+    def _sink(msg):
+        messages.append(msg)
+
+    sink_id = logger.add(_sink, format="{message}", level="WARNING")
+    try:
+        q.cross_section(CONCEPT, ["2023-01-01", "2099-06-01"])
+    finally:
+        logger.remove(sink_id)
+
+    assert any("future" in m for m in messages), f"No 'future' warning found in: {messages}"
+
+
+def test_ttm_cross_section_warns_on_future_date(ttm_parquet_path, reset_future_warned):
+    """ttm_cross_section with a future date should emit a warning containing 'future'."""
+    q = PitQuery(ttm_parquet_path)
+    messages: list[str] = []
+
+    def _sink(msg):
+        messages.append(msg)
+
+    sink_id = logger.add(_sink, format="{message}", level="WARNING")
+    try:
+        q.ttm_cross_section(CONCEPT, "2099-01-01")
+    finally:
+        logger.remove(sink_id)
+
+    assert any("future" in m for m in messages), f"No 'future' warning found in: {messages}"
+
+
+def test_past_date_does_not_warn(parquet_path, reset_future_warned):
+    """as_of with a past date must not emit any future-date warning."""
+    q = PitQuery(parquet_path)
+    messages: list[str] = []
+
+    def _sink(msg):
+        messages.append(msg)
+
+    sink_id = logger.add(_sink, format="{message}", level="WARNING")
+    try:
+        q.as_of("AAPL", CONCEPT, "2023-01-01")
+    finally:
+        logger.remove(sink_id)
+
+    assert not any("future" in m for m in messages), f"Unexpected 'future' warning: {messages}"

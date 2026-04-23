@@ -3,8 +3,36 @@
 from pathlib import Path
 
 import pandas as pd
+from loguru import logger
 
 from pitedgar.periods import Q_MAX, Q_MIN, is_annual, is_quarterly
+
+# ---------------------------------------------------------------------------
+# Future-date warning helper
+# ---------------------------------------------------------------------------
+
+_FUTURE_WARNED: set = set()  # module-level dedup across calls
+
+
+def _warn_if_future(dates: "pd.DatetimeIndex | list[pd.Timestamp]") -> None:
+    """Emit a one-time warning when any of *dates* lies in the future.
+
+    Args:
+        dates: one or more timestamps to check.
+    """
+    today = pd.Timestamp.today().normalize()
+    future = [d for d in pd.DatetimeIndex(dates) if d > today + pd.Timedelta(days=1)]
+    if not future:
+        return
+    key = (min(future), max(future))
+    if key in _FUTURE_WARNED:
+        return
+    _FUTURE_WARNED.add(key)
+    logger.warning(
+        f"{len(future)} as_of_date(s) are in the future "
+        f"(e.g. {future[0].date()} … {future[-1].date()}). "
+        f"Most likely a typo; the query will still return the latest known filing."
+    )
 
 
 def _snapshot_events(grp: pd.DataFrame) -> pd.DataFrame:
@@ -292,6 +320,7 @@ class PitQuery:
         if isinstance(tickers, str):
             tickers = [tickers]
         as_of_ts = pd.Timestamp(as_of_date)
+        _warn_if_future([as_of_ts])
 
         mask = (
             self.data["ticker"].isin(tickers)
@@ -489,6 +518,7 @@ class PitQuery:
         if isinstance(as_of_dates, str):
             as_of_dates = [as_of_dates]
         dates = pd.DatetimeIndex(pd.to_datetime(as_of_dates)).sort_values()
+        _warn_if_future(dates)
 
         universe = tickers if tickers is not None else self.data["ticker"].unique().tolist()
 
@@ -628,6 +658,7 @@ class PitQuery:
         if isinstance(as_of_dates, str):
             as_of_dates = [as_of_dates]
         dates = pd.DatetimeIndex(pd.to_datetime(as_of_dates)).sort_values()
+        _warn_if_future(dates)
 
         universe = tickers if tickers is not None else self.data["ticker"].unique().tolist()
 
