@@ -342,21 +342,43 @@ class PitQuery:
         concept: str,
         start_date: str | None = None,
         end_date: str | None = None,
+        as_of: str | pd.Timestamp | None = None,
         freq: str = "Q",
     ) -> pd.DataFrame:
         """Point-in-time history of a concept for a single ticker.
 
+        WARNING — default ``as_of=None`` is NON-PIT:
+            When ``as_of`` is not supplied, this method returns the
+            *latest-filed* (most-restated) value for every period end,
+            regardless of when those filings occurred. Future filings that
+            would not have been available at the time are silently included.
+            Do NOT use the default in any backtest feature pipeline. Pass an
+            explicit ``as_of`` date to get a proper point-in-time series.
+
+        PIT usage (``as_of`` is provided):
+            Only filings with ``filed <= as_of`` are considered. For each
+            period end, the most-recently-filed value *as of that date* is
+            returned. This gives the correct restated-as-of view and prevents
+            look-ahead bias.
+
         Args:
             ticker:     company ticker symbol.
             concept:    XBRL concept, e.g. "us-gaap:Revenues".
-            start_date: filter end >= start_date (ISO string).
-            end_date:   filter end <= end_date (ISO string).
+            start_date: filter end >= start_date (ISO string). Filters on
+                        period-end date, not filing date.
+            end_date:   filter end <= end_date (ISO string). Filters on
+                        period-end date, not filing date.
+            as_of:      observation date (ISO string or Timestamp). When
+                        provided, restricts to filings with filed <= as_of
+                        before deduplicating. Default ``None`` keeps all
+                        filings (non-PIT — see warning above).
             freq:       "Q" → quarterly periods (60-105 days),
                         "A" → annual filings (10-K/A/20-F with 340-380 day duration),
                         anything else → all.
 
         Returns DataFrame with columns: ticker, concept, end, filed, val, form, accn.
-        For each period end, shows the latest-filed (restated) value.
+        For each period end, shows the latest-filed (restated) value as of
+        ``as_of`` (if provided) or the globally latest-filed value (if not).
         """
         mask = (self.data["ticker"] == ticker) & (self.data["concept"] == concept)
 
@@ -371,6 +393,13 @@ class PitQuery:
             mask &= is_annual(self.data["duration_days"], self.data["form"])
 
         sub = self.data.loc[mask].copy()
+
+        # PIT filter: restrict to filings known as of the observation date.
+        # This must happen BEFORE the end-date dedup so we get the correct
+        # restated value for each period end as of that date.
+        if as_of is not None:
+            as_of_ts = pd.Timestamp(as_of)
+            sub = sub[sub["filed"] <= as_of_ts]
 
         if start_date is not None:
             sub = sub[sub["end"] >= pd.Timestamp(start_date)]
