@@ -153,25 +153,64 @@ def _derive_quarterly_from_ytd(df: pd.DataFrame) -> pd.DataFrame:
             duration = (curr_end - prev_end).days
             if duration < Q_MIN or duration > Q_MAX:
                 continue
-            prev_rows = grp[grp["end"] == prev_end]
-            curr_rows = grp[grp["end"] == curr_end]
-            for _, p in prev_rows.iterrows():
-                for _, c in curr_rows.iterrows():
-                    filed = p["filed"] if p["filed"] >= c["filed"] else c["filed"]
-                    src_accn = c.get("accn", "")
-                    src_form = c.get("form", "")
-                    rows.append(
-                        {
-                            "end": curr_end,
-                            "filed": filed,
-                            "val": c["val"] - p["val"],
-                            "duration_days": duration,
-                            "form": src_form,
-                            "accn": f"{src_accn}:DERIVED_YTD_DIFF",
-                            "start": prev_end,
-                        }
-                    )
-    return pd.DataFrame(rows, columns=_SYNTH_COLS) if rows else empty
+            prev_rows = grp[grp["end"] == prev_end].sort_values("filed").reset_index(drop=True)
+            curr_rows = grp[grp["end"] == curr_end].sort_values("filed").reset_index(drop=True)
+
+            # O(N+M) sweep: merge the two sorted-by-filed streams and emit one
+            # synthetic row per "event" using the current latest-of-both.
+            # Each event is either a new curr filing or a new prev filing.
+            # At every event the synthetic filed = max(latest_prev.filed, curr.filed)
+            # (or max(prev.filed, latest_curr.filed) for a prev-only event).
+            pi = 0  # index into prev_rows
+            ci = 0  # index into curr_rows
+            latest_prev_idx: int | None = None
+            latest_curr_idx: int | None = None
+            n_prev = len(prev_rows)
+            n_curr = len(curr_rows)
+
+            while pi < n_prev or ci < n_curr:
+                # Determine which stream has the next (earliest) event.
+                prev_filed = prev_rows.iloc[pi]["filed"] if pi < n_prev else None
+                curr_filed = curr_rows.iloc[ci]["filed"] if ci < n_curr else None
+
+                # Advance the stream with the smaller filed date (ties: advance both).
+                advance_prev = prev_filed is not None and (curr_filed is None or prev_filed <= curr_filed)
+                advance_curr = curr_filed is not None and (prev_filed is None or curr_filed <= prev_filed)
+
+                if advance_prev:
+                    latest_prev_idx = pi
+                    pi += 1
+                if advance_curr:
+                    latest_curr_idx = ci
+                    ci += 1
+
+                # Emit a row only when both streams have contributed at least one filing.
+                if latest_prev_idx is None or latest_curr_idx is None:
+                    continue
+
+                p = prev_rows.iloc[latest_prev_idx]
+                c = curr_rows.iloc[latest_curr_idx]
+                filed = p["filed"] if p["filed"] >= c["filed"] else c["filed"]
+                src_accn = c.get("accn", "")
+                src_form = c.get("form", "")
+                rows.append(
+                    {
+                        "end": curr_end,
+                        "filed": filed,
+                        "val": c["val"] - p["val"],
+                        "duration_days": duration,
+                        "form": src_form,
+                        "accn": f"{src_accn}:DERIVED_YTD_DIFF",
+                        "start": prev_end,
+                    }
+                )
+
+    result = pd.DataFrame(rows, columns=_SYNTH_COLS) if rows else empty
+    # Collapse any duplicate (end, filed) pairs that the sweep may emit when both
+    # streams advance on the same date — keep last (latest val, consistent with PIT).
+    if not result.empty:
+        result = result.drop_duplicates(subset=["end", "filed"], keep="last")
+    return result
 
 
 def _combine_quarterly_sources(
