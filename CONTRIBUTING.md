@@ -45,6 +45,23 @@ pytest -v
 - Type hints are encouraged for public API functions.
 - Docstrings on public classes and functions are appreciated.
 
+## Adversarial regression tests
+
+The `tests/test_adversarial.py` file is the umbrella for cross-cutting
+regression tests surfaced during adversarial review (see issue #38). When
+fixing an adversarial-review finding on a dedicated branch, add the primary
+regression test in the most natural `test_<module>.py` file and add one
+smoke test to `test_adversarial.py` covering the cross-cutting invariant.
+
+Run the adversarial subset with:
+
+```bash
+pytest -m adversarial
+```
+
+See [tests/README.md](tests/README.md) for the full test layout and guidance
+on adding new regression tests.
+
 ## Reporting bugs
 
 Open an issue and include:
