@@ -80,6 +80,31 @@ def _download_with_retries(
             time.sleep(sleep_s)
 
 
+_SINGLE_FILE_LIMIT_BYTES = 10 * 1024**3  # 10 GiB — no legitimate SEC JSON comes close
+
+
+def _check_zip_size(zf: zipfile.ZipFile, limit: int) -> None:
+    """Reject ZIP archives whose declared decompressed size looks like a zip bomb.
+
+    Raises:
+        RuntimeError: if the total declared decompressed size across all members
+            exceeds *limit*, or if any single member declares a size > 10 GiB.
+    """
+    total = 0
+    for info in zf.infolist():
+        if info.file_size > _SINGLE_FILE_LIMIT_BYTES:
+            raise RuntimeError(
+                f"ZIP member '{info.filename}' declares decompressed size "
+                f"{info.file_size:,} bytes which exceeds the single-file cap "
+                f"{_SINGLE_FILE_LIMIT_BYTES:,} bytes — possible zip bomb"
+            )
+        total += info.file_size
+    if total > limit:
+        raise RuntimeError(
+            f"Zip decompressed size {total:,} exceeds cap {limit:,} bytes — possible zip bomb"
+        )
+
+
 def download_bulk(config: PitEdgarConfig, force: bool = False) -> Path:
     """Download and extract the SEC companyfacts bulk ZIP.
 
@@ -112,6 +137,7 @@ def download_bulk(config: PitEdgarConfig, force: bool = False) -> Path:
         logger.info(f"Extracting to {facts_dir} …")
         try:
             with zipfile.ZipFile(zip_path, "r") as zf:
+                _check_zip_size(zf, config.max_extracted_bytes)
                 members = zf.namelist()
                 for member in tqdm(members, desc="Extracting", unit="file"):
                     zf.extract(member, facts_dir)

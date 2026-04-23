@@ -77,6 +77,7 @@ class PitEdgarConfig(BaseModel):
     # explicit list (e.g. ``DEFAULT_CONCEPTS``) to opt back into the curated subset.
     concepts: list[str] | None = None
     forms: list[str] = DEFAULT_FORMS
+    max_extracted_bytes: int = 25 * 1024**3  # 25 GiB decompressed-size cap (zip-bomb guard)
 
     model_config = {"arbitrary_types_allowed": True}
 
