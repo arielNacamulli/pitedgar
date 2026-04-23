@@ -9,7 +9,7 @@ import pandas as pd
 from loguru import logger
 from tqdm import tqdm
 
-from pitedgar.config import CONCEPT_ALIASES, PitEdgarConfig
+from pitedgar.config import CONCEPT_ALIAS_PRIORITY, CONCEPT_ALIASES, PitEdgarConfig
 from pitedgar.periods import is_quarterly
 
 # Units to attempt per concept, in priority order.
@@ -75,11 +75,12 @@ def parse_company(
 
     rows: list[dict] = []
 
-    # Build reverse alias map: canonical -> [alias, ...]
-    alias_lookup: dict[str, list[str]] = {c: [] for c in concepts}
-    for alias, canonical in CONCEPT_ALIASES.items():
-        if canonical in alias_lookup:
-            alias_lookup[canonical].append(alias)
+    # Build reverse alias map: canonical -> [alias, ...] in explicit priority order.
+    # CONCEPT_ALIAS_PRIORITY is the source of truth for ordering; aliases earlier in
+    # the list take precedence when two aliases collide on (end, filed, form).
+    alias_lookup: dict[str, list[str]] = {
+        c: list(CONCEPT_ALIAS_PRIORITY.get(c, [])) for c in concepts
+    }
 
     for concept_full in concepts:
         # Union data from the canonical concept AND every alias — a filer may
