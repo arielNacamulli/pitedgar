@@ -180,14 +180,23 @@ def test_corrupt_zip_is_deleted_and_surfaced(config):
     assert not zip_path.exists()
 
 
+def _make_http_error(status_code: int, headers: dict | None = None) -> requests.HTTPError:
+    """Build a requests.HTTPError with a real-ish response for *status_code*."""
+    http_resp = MagicMock()
+    http_resp.status_code = status_code
+    http_resp.headers = headers or {}
+    err = requests.HTTPError(str(status_code), response=http_resp)
+    return err
+
+
 def test_non_retryable_error_propagates_immediately(config):
-    """HTTPError (e.g. 404/500) should not be retried — surface once."""
+    """HTTPError with a non-retryable status (404) should surface on the first call."""
     config.facts_dir.mkdir(parents=True, exist_ok=True)
 
     resp = MagicMock()
     resp.__enter__ = lambda s: s
     resp.__exit__ = MagicMock(return_value=False)
-    resp.raise_for_status = MagicMock(side_effect=requests.HTTPError("404"))
+    resp.raise_for_status = MagicMock(side_effect=_make_http_error(404))
 
     with (
         patch("pitedgar.downloader.requests.get", return_value=resp) as mock_get,
@@ -196,4 +205,103 @@ def test_non_retryable_error_propagates_immediately(config):
     ):
         download_bulk(config, force=False)
 
+    assert mock_get.call_count == 1
+
+
+def test_404_still_non_retryable(config):
+    """404 must propagate immediately without any retry."""
+    config.facts_dir.mkdir(parents=True, exist_ok=True)
+
+    resp = MagicMock()
+    resp.__enter__ = lambda s: s
+    resp.__exit__ = MagicMock(return_value=False)
+    resp.raise_for_status = MagicMock(side_effect=_make_http_error(404))
+
+    with (
+        patch("pitedgar.downloader.requests.get", return_value=resp) as mock_get,
+        patch("pitedgar.downloader.time.sleep") as mock_sleep,
+        pytest.raises(requests.HTTPError),
+    ):
+        download_bulk(config, force=False)
+
+    assert mock_get.call_count == 1
+    mock_sleep.assert_not_called()
+
+
+def test_retries_on_429_with_retry_after(config):
+    """429 with Retry-After: 2 should retry once then succeed; sleep >= 2."""
+    config.facts_dir.mkdir(parents=True, exist_ok=True)
+
+    buf = io.BytesIO()
+    _make_zip(buf)
+    zip_bytes = buf.getvalue()
+    good_resp = _make_streaming_response(zip_bytes)
+
+    call_count = {"n": 0}
+
+    def flaky_get(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise _make_http_error(429, headers={"Retry-After": "2"})
+        return good_resp
+
+    with (
+        patch("pitedgar.downloader.requests.get", side_effect=flaky_get),
+        patch("pitedgar.downloader.time.sleep") as mock_sleep,
+    ):
+        download_bulk(config, force=False)
+
+    assert call_count["n"] == 2
+    assert mock_sleep.call_count >= 1
+    slept = mock_sleep.call_args[0][0]
+    assert slept >= 2, f"Expected sleep >= 2, got {slept}"
+
+
+def test_retries_on_503(config):
+    """503 should be retried and succeed on the second attempt."""
+    config.facts_dir.mkdir(parents=True, exist_ok=True)
+
+    buf = io.BytesIO()
+    _make_zip(buf)
+    zip_bytes = buf.getvalue()
+    good_resp = _make_streaming_response(zip_bytes)
+
+    call_count = {"n": 0}
+
+    def flaky_get(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise _make_http_error(503)
+        return good_resp
+
+    with (
+        patch("pitedgar.downloader.requests.get", side_effect=flaky_get),
+        patch("pitedgar.downloader.time.sleep"),
+    ):
+        download_bulk(config, force=False)
+
+    assert call_count["n"] == 2
+    assert (config.data_dir / "companyfacts.zip").exists()
+
+
+def test_total_wait_cap_aborts_retries(config):
+    """Retry-After: 500 exceeds the 300 s cap — retry must be aborted immediately."""
+    config.facts_dir.mkdir(parents=True, exist_ok=True)
+
+    resp = MagicMock()
+    resp.__enter__ = lambda s: s
+    resp.__exit__ = MagicMock(return_value=False)
+    resp.raise_for_status = MagicMock(
+        side_effect=_make_http_error(429, headers={"Retry-After": "500"})
+    )
+
+    with (
+        patch("pitedgar.downloader.requests.get", return_value=resp) as mock_get,
+        patch("pitedgar.downloader.time.sleep") as mock_sleep,
+        pytest.raises(requests.HTTPError),
+    ):
+        download_bulk(config, force=False)
+
+    # The cap must prevent any actual sleep — the exception should be raised before sleeping.
+    mock_sleep.assert_not_called()
     assert mock_get.call_count == 1

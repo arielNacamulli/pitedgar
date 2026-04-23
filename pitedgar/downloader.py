@@ -15,8 +15,10 @@ _RETRYABLE_EXCEPTIONS: tuple[type[BaseException], ...] = (
     requests.Timeout,
     requests.exceptions.ChunkedEncodingError,
 )
+_RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({429, 502, 503, 504})
 _DEFAULT_MAX_RETRIES = 4
 _DEFAULT_BACKOFF_BASE_SECONDS = 2.0
+_MAX_TOTAL_WAIT_SECONDS = 300
 
 
 def _stream_to_file(
@@ -63,17 +65,53 @@ def _download_with_retries(
     backoff_base: float = _DEFAULT_BACKOFF_BASE_SECONDS,
     timeout: int = 120,
 ) -> None:
-    """Retry transient network failures with exponential backoff."""
+    """Retry transient network failures with exponential backoff.
+
+    HTTP 429/502/503/504 responses are treated as retryable. A ``Retry-After``
+    header is honoured when present.  Total accumulated sleep is capped at
+    ``_MAX_TOTAL_WAIT_SECONDS`` (300 s); if that cap would be exceeded the last
+    exception is re-raised immediately.
+    """
     attempt = 0
+    total_waited = 0.0
     while True:
         try:
             _stream_to_file(url, headers, dest, timeout=timeout)
             return
+        except requests.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if status not in _RETRYABLE_STATUS_CODES:
+                raise
+            attempt += 1
+            if attempt > max_retries:
+                raise
+            # Determine sleep duration, honouring Retry-After when present.
+            retry_after = exc.response.headers.get("Retry-After") if exc.response is not None else None
+            if retry_after is not None:
+                try:
+                    wait = float(retry_after)
+                except ValueError:
+                    # HTTP-date format — fall back to exponential backoff.
+                    wait = backoff_base**attempt
+                sleep_s = max(wait, backoff_base**attempt)
+            else:
+                sleep_s = backoff_base**attempt
+            # Cap total accumulated wait.
+            if total_waited + sleep_s > _MAX_TOTAL_WAIT_SECONDS:
+                raise
+            total_waited += sleep_s
+            logger.warning(
+                f"Download attempt {attempt}/{max_retries} failed (HTTP {status}); retrying in {sleep_s:.1f}s…"
+            )
+            time.sleep(sleep_s)
         except _RETRYABLE_EXCEPTIONS as exc:
             attempt += 1
             if attempt > max_retries:
                 raise
             sleep_s = backoff_base**attempt
+            if total_waited + sleep_s > _MAX_TOTAL_WAIT_SECONDS:
+                raise
+            total_waited += sleep_s
             logger.warning(
                 f"Download attempt {attempt}/{max_retries} failed ({exc!r}); retrying in {sleep_s:.1f}s…"
             )
