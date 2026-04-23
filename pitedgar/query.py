@@ -200,7 +200,11 @@ def _combine_quarterly_sources(
     return combined
 
 
-def _ttm_events(grp: pd.DataFrame, min_periods: int = 4) -> pd.DataFrame:
+def _ttm_events(
+    grp: pd.DataFrame,
+    min_periods: int = 4,
+    max_gap_days: int | None = 400,
+) -> pd.DataFrame:
     """Compute TTM step-function events for one ticker from sorted 10-Q rows.
 
     Uses a running-state dict: each filing date updates the current value for
@@ -208,10 +212,14 @@ def _ttm_events(grp: pd.DataFrame, min_periods: int = 4) -> pd.DataFrame:
     Complexity: O(n log n) — dominated by the top-4 sort, not a DataFrame scan.
 
     Args:
-        grp:         DataFrame with columns end, filed, val, sorted by filed ascending.
-        min_periods: minimum distinct quarters required before emitting a row.
+        grp:          DataFrame with columns end, filed, val, sorted by filed ascending.
+        min_periods:  minimum distinct quarters required before emitting a row.
+        max_gap_days: maximum allowed span (in days) between the earliest and latest
+                      of the top-4 quarter end dates. When the span exceeds this
+                      threshold the row is silently dropped (non-contiguous quarters).
+                      Pass ``None`` to disable the check.
 
-    Returns DataFrame with columns: filed, ttm_val, n_periods.
+    Returns DataFrame with columns: filed, ttm_val, n_periods, ttm_end_min, ttm_end_max.
     """
     state: dict = {}  # {end_timestamp: val}
     rows = []
@@ -229,9 +237,24 @@ def _ttm_events(grp: pd.DataFrame, min_periods: int = 4) -> pd.DataFrame:
         top = sorted(state.keys(), reverse=True)[:4]
         n = len(top)
         if n >= min_periods:
-            rows.append({"filed": current_filed, "ttm_val": sum(state[k] for k in top), "n_periods": n})
+            end_min = min(top)
+            end_max = max(top)
+            if max_gap_days is not None:
+                span_days = (pd.Timestamp(end_max) - pd.Timestamp(end_min)).days
+                if span_days > max_gap_days:
+                    continue
+            rows.append(
+                {
+                    "filed": current_filed,
+                    "ttm_val": sum(state[k] for k in top),
+                    "n_periods": n,
+                    "ttm_end_min": end_min,
+                    "ttm_end_max": end_max,
+                }
+            )
 
-    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["filed", "ttm_val", "n_periods"])
+    empty_cols = ["filed", "ttm_val", "n_periods", "ttm_end_min", "ttm_end_max"]
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=empty_cols)
 
 
 class PitQuery:
@@ -388,6 +411,7 @@ class PitQuery:
         start_date: str | None = None,
         end_date: str | None = None,
         min_periods: int = 4,
+        max_ttm_span_days: int | None = 400,
     ) -> pd.DataFrame:
         """Point-in-time trailing-twelve-month series from quarterly filings.
 
@@ -396,14 +420,21 @@ class PitQuery:
         min_periods available quarters are dropped.
 
         Args:
-            ticker:      company ticker symbol.
-            concept:     XBRL concept, e.g. "us-gaap:Revenues".
-            start_date:  include only rows with filed >= start_date.
-            end_date:    include only rows with filed <= end_date.
-            min_periods: minimum quarters required to emit a TTM row (default 4).
+            ticker:              company ticker symbol.
+            concept:             XBRL concept, e.g. "us-gaap:Revenues".
+            start_date:          include only rows with filed >= start_date.
+            end_date:            include only rows with filed <= end_date.
+            min_periods:         minimum quarters required to emit a TTM row (default 4).
+            max_ttm_span_days:   maximum span (in days) between the earliest and latest
+                                 of the top-4 quarter end dates. Rows whose top-4 end
+                                 span exceeds this threshold are silently dropped (treat
+                                 non-contiguous quarters: fiscal-year changes, mergers,
+                                 delistings). Default 400. Pass ``None`` to disable.
 
-        Returns DataFrame with columns: ticker, concept, filed, ttm_val, n_periods
+        Returns DataFrame with columns: ticker, concept, filed, ttm_val, n_periods,
+            ttm_end_min, ttm_end_max
         """
+        _empty_cols = ["ticker", "concept", "filed", "ttm_val", "n_periods", "ttm_end_min", "ttm_end_max"]
         base_mask = (self.data["ticker"] == ticker) & (self.data["concept"] == concept)
         sub_all = self.data.loc[base_mask]
         sub_k = sub_all.loc[is_annual(sub_all["duration_days"], sub_all["form"])]
@@ -415,7 +446,7 @@ class PitQuery:
         sub = _combine_quarterly_sources(sub_all, is_quarterly(sub_all["duration_days"])).sort_values("filed")
 
         if sub.empty:
-            return pd.DataFrame(columns=["ticker", "concept", "filed", "ttm_val", "n_periods"])
+            return pd.DataFrame(columns=_empty_cols)
 
         # Inject synthetic Q4 rows derived from 10-K annual filings so that
         # December-FY companies (and others whose Q4 only appears in a 10-K)
@@ -424,9 +455,9 @@ class PitQuery:
         if not q4_rows.empty:
             sub = pd.concat([sub, q4_rows], ignore_index=True).sort_values("filed")
 
-        result = _ttm_events(sub, min_periods=min_periods)
+        result = _ttm_events(sub, min_periods=min_periods, max_gap_days=max_ttm_span_days)
         if result.empty:
-            return pd.DataFrame(columns=["ticker", "concept", "filed", "ttm_val", "n_periods"])
+            return pd.DataFrame(columns=_empty_cols)
 
         result.insert(0, "ticker", ticker)
         result.insert(1, "concept", concept)
@@ -445,6 +476,7 @@ class PitQuery:
         tickers: list[str] | None = None,
         min_periods: int = 4,
         max_staleness_days: int | None = None,
+        max_ttm_span_days: int | None = 400,
     ) -> pd.DataFrame:
         """Trailing-twelve-month values for a full universe across one or more dates.
 
@@ -482,9 +514,14 @@ class PitQuery:
                                 predates the as_of_date by more than this many days.
                                 Default ``None`` keeps every value; ``age_days``
                                 is always returned regardless.
+            max_ttm_span_days:  maximum span (in days) between the earliest and latest
+                                of the top-4 quarter end dates. Rows whose span exceeds
+                                this threshold are silently dropped. Default 400. Pass
+                                ``None`` to disable.
 
         Returns DataFrame with columns:
-            as_of_date, ticker, ttm_val, n_periods, filed, age_days
+            as_of_date, ticker, ttm_val, n_periods, filed, age_days,
+            ttm_end_min, ttm_end_max
         """
         if isinstance(as_of_dates, str):
             as_of_dates = [as_of_dates]
@@ -518,7 +555,7 @@ class PitQuery:
             q4_rows = _derive_q4_rows(combined, grp_k)
             if not q4_rows.empty:
                 combined = pd.concat([combined, q4_rows], ignore_index=True).sort_values("filed")
-            events = _ttm_events(combined, min_periods=min_periods)
+            events = _ttm_events(combined, min_periods=min_periods, max_gap_days=max_ttm_span_days)
             if not events.empty:
                 events["ticker"] = ticker
                 ttm_frames.append(events)
@@ -539,8 +576,10 @@ class PitQuery:
         if not ttm_frames:
             cross[["ttm_val", "n_periods", "filed"]] = [float("nan"), 0, pd.NaT]  # type: ignore[list-item,assignment]
             cross["age_days"] = pd.array([pd.NA] * len(cross), dtype="Int64")
+            cross["ttm_end_min"] = pd.NaT
+            cross["ttm_end_max"] = pd.NaT
             return (
-                cross[["as_of_date", "ticker", "ttm_val", "n_periods", "filed", "age_days"]]
+                cross[["as_of_date", "ticker", "ttm_val", "n_periods", "filed", "age_days", "ttm_end_min", "ttm_end_max"]]
                 .sort_values(["as_of_date", "ticker"])
                 .reset_index(drop=True)
             )
@@ -551,7 +590,7 @@ class PitQuery:
         # Single vectorized lookup: merge_asof groups by ticker in one C-level pass.
         result = pd.merge_asof(
             cross,
-            all_events[["ticker", "filed", "ttm_val", "n_periods"]],
+            all_events[["ticker", "filed", "ttm_val", "n_periods", "ttm_end_min", "ttm_end_max"]],
             left_on="as_of_date",
             right_on="filed",
             by="ticker",
@@ -576,10 +615,12 @@ class PitQuery:
             )
             filler[["ttm_val", "n_periods", "filed"]] = [float("nan"), 0, pd.NaT]  # type: ignore[list-item,assignment]
             filler["age_days"] = pd.array([pd.NA] * len(filler), dtype="Int64")
+            filler["ttm_end_min"] = pd.NaT
+            filler["ttm_end_max"] = pd.NaT
             result = pd.concat([result, filler], ignore_index=True)
 
         return (
-            result[["as_of_date", "ticker", "ttm_val", "n_periods", "filed", "age_days"]]
+            result[["as_of_date", "ticker", "ttm_val", "n_periods", "filed", "age_days", "ttm_end_min", "ttm_end_max"]]
             .sort_values(["as_of_date", "ticker"])
             .reset_index(drop=True)
         )
