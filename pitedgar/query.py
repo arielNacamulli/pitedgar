@@ -1,8 +1,10 @@
 """PIT query API over the master parquet."""
 
+import difflib
 from pathlib import Path
 
 import pandas as pd
+from loguru import logger
 
 from pitedgar.periods import Q_MAX, Q_MIN, is_annual, is_quarterly
 
@@ -237,7 +239,7 @@ def _ttm_events(grp: pd.DataFrame, min_periods: int = 4) -> pd.DataFrame:
 class PitQuery:
     """Query point-in-time financial data from a master parquet file."""
 
-    def __init__(self, parquet_path: Path) -> None:
+    def __init__(self, parquet_path: Path, strict_concepts: bool = False) -> None:
         self.data = pd.read_parquet(parquet_path)
         self.data["filed"] = pd.to_datetime(self.data["filed"], errors="coerce")
         self.data["end"] = pd.to_datetime(self.data["end"], errors="coerce")
@@ -250,6 +252,41 @@ class PitQuery:
         # infer from form (10-Q → 91, 10-K → 365) as a safe approximation.
         if "duration_days" not in self.data.columns:
             self.data["duration_days"] = self.data["form"].map({"10-Q": 91, "10-K": 365}).fillna(-1)
+        self.strict_concepts = strict_concepts
+        self._known_concepts: set[str] = set(self.data["concept"].unique())
+        self._warned_concepts: set[str] = set()
+
+    # ------------------------------------------------------------------
+    # Concept validation
+    # ------------------------------------------------------------------
+
+    def known_concepts(self) -> list[str]:
+        """Return a sorted list of all concept strings present in the loaded parquet."""
+        return sorted(self._known_concepts)
+
+    def _check_concept(self, concept: str) -> None:
+        """Validate *concept* against the loaded data; warn or raise on unknown concepts.
+
+        - Known concept: no-op.
+        - Unknown + strict_concepts=True: raise KeyError with suggestions.
+        - Unknown + strict_concepts=False: emit a one-shot loguru warning (once per
+          concept per instance) with up to 3 nearest-match suggestions.
+        """
+        if concept in self._known_concepts:
+            return
+        suggestions = difflib.get_close_matches(concept, self._known_concepts, n=3, cutoff=0.6)
+        if self.strict_concepts:
+            raise KeyError(
+                f"Unknown concept {concept!r}. "
+                f"Nearest: {suggestions}. See q.known_concepts() for available."
+            )
+        if concept not in self._warned_concepts:
+            self._warned_concepts.add(concept)
+            logger.warning(
+                "Unknown concept {!r}. Nearest: {}. See q.known_concepts() for full list.",
+                concept,
+                suggestions,
+            )
 
     # ------------------------------------------------------------------
     # Public API
@@ -289,6 +326,7 @@ class PitQuery:
 
         Returns DataFrame with columns: ticker, val, filed, end, form, age_days
         """
+        self._check_concept(concept)
         if isinstance(tickers, str):
             tickers = [tickers]
         as_of_ts = pd.Timestamp(as_of_date)
@@ -358,6 +396,7 @@ class PitQuery:
         Returns DataFrame with columns: ticker, concept, end, filed, val, form, accn.
         For each period end, shows the latest-filed (restated) value.
         """
+        self._check_concept(concept)
         mask = (self.data["ticker"] == ticker) & (self.data["concept"] == concept)
 
         # Classify by duration_days, not form: some filers (notably Apple for
@@ -404,6 +443,7 @@ class PitQuery:
 
         Returns DataFrame with columns: ticker, concept, filed, ttm_val, n_periods
         """
+        self._check_concept(concept)
         base_mask = (self.data["ticker"] == ticker) & (self.data["concept"] == concept)
         sub_all = self.data.loc[base_mask]
         sub_k = sub_all.loc[is_annual(sub_all["duration_days"], sub_all["form"])]
@@ -486,6 +526,7 @@ class PitQuery:
         Returns DataFrame with columns:
             as_of_date, ticker, ttm_val, n_periods, filed, age_days
         """
+        self._check_concept(concept)
         if isinstance(as_of_dates, str):
             as_of_dates = [as_of_dates]
         dates = pd.DatetimeIndex(pd.to_datetime(as_of_dates)).sort_values()
@@ -625,6 +666,7 @@ class PitQuery:
         Returns DataFrame with columns:
             as_of_date, ticker, val, filed, end, form, age_days
         """
+        self._check_concept(concept)
         if isinstance(as_of_dates, str):
             as_of_dates = [as_of_dates]
         dates = pd.DatetimeIndex(pd.to_datetime(as_of_dates)).sort_values()
