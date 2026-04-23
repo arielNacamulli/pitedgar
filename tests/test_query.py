@@ -1186,6 +1186,119 @@ def test_ttm_no_regression_when_only_discrete_quarters(tmp_path):
     assert last["n_periods"] == 4
 
 
+# ---------------------------------------------------------------------------
+# Issue #28: n_periods consistency between present-but-no-prior-filing and missing ticker
+# ---------------------------------------------------------------------------
+
+
+def test_ttm_cross_section_n_periods_zero_when_no_prior_filing(tmp_path):
+    """Ticker present in data but all filings are AFTER as_of_date → n_periods == 0,
+    ttm_val NaN. Must work WITHOUT passing max_staleness_days."""
+    records = [
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-03-31",
+            "filed": "2023-04-28",
+            "val": 100.0,
+            "form": "10-Q",
+            "accn": "Q1",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-06-30",
+            "filed": "2023-07-28",
+            "val": 200.0,
+            "form": "10-Q",
+            "accn": "Q2",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-09-30",
+            "filed": "2023-10-28",
+            "val": 300.0,
+            "form": "10-Q",
+            "accn": "Q3",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-12-31",
+            "filed": "2024-01-28",
+            "val": 400.0,
+            "form": "10-Q",
+            "accn": "Q4",
+        },
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    q = PitQuery(path)
+
+    # Query before ANY filing exists → ticker is present in the universe but has
+    # no event before as_of_date; merge_asof previously left n_periods as NaN.
+    result = q.ttm_cross_section(CONCEPT, "2023-01-01", tickers=["AAPL"])
+    assert len(result) == 1
+    row = result.iloc[0]
+    assert row["ticker"] == "AAPL"
+    assert pd.isna(row["ttm_val"])
+    assert row["n_periods"] == 0  # must be 0, not NaN
+
+
+def test_ttm_cross_section_n_periods_zero_for_missing_ticker_unchanged(tmp_path):
+    """Regression: ticker absent from the data universe still gets n_periods == 0."""
+    records = [
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-03-31",
+            "filed": "2023-04-28",
+            "val": 100.0,
+            "form": "10-Q",
+            "accn": "Q1",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-06-30",
+            "filed": "2023-07-28",
+            "val": 200.0,
+            "form": "10-Q",
+            "accn": "Q2",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-09-30",
+            "filed": "2023-10-28",
+            "val": 300.0,
+            "form": "10-Q",
+            "accn": "Q3",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-12-31",
+            "filed": "2024-01-28",
+            "val": 400.0,
+            "form": "10-Q",
+            "accn": "Q4",
+        },
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    q = PitQuery(path)
+
+    # MSFT is not in the data at all → filler row.
+    result = q.ttm_cross_section(CONCEPT, "2024-06-01", tickers=["AAPL", "MSFT"])
+    msft = result[result["ticker"] == "MSFT"].iloc[0]
+    assert pd.isna(msft["ttm_val"])
+    assert msft["n_periods"] == 0
+
+
 def test_ttm_cross_section_matches_ttm_on_ytd_universe(tmp_path):
     """ttm_cross_section must return the same TTM as per-ticker ttm() for a mixed
     universe — including AAPL-style YTD-only filers."""
