@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pandas as pd
+from loguru import logger
 
 from pitedgar.periods import Q_MAX, Q_MIN, is_annual, is_quarterly
 
@@ -90,7 +91,46 @@ def _derive_q4_rows(df_q: pd.DataFrame, df_k: pd.DataFrame) -> pd.DataFrame:
             # Require all three quarters present to safely isolate Q4.
             continue
 
+        # Validate that the 3 quarterly ends form a monotonic sequence with
+        # per-quarter gaps in [Q_MIN, Q_MAX].  A gap outside this range signals
+        # misattributed or restated quarters (e.g. a shifted end date that
+        # survived dedup), which would make q4_val nonsensical.
+        q_sorted = q_in_year.sort_values("end")
+        ends_sorted = q_sorted["end"].tolist()
+        gaps_ok = True
+        for i in range(1, len(ends_sorted)):
+            gap = (ends_sorted[i] - ends_sorted[i - 1]).days
+            if gap < Q_MIN or gap > Q_MAX:
+                logger.debug(
+                    "Skipping Q4 derivation for FY end {}: gap between ends {} and {} "
+                    "is {} days, outside quarterly range [{}, {}]",
+                    fy_end.date(),
+                    ends_sorted[i - 1].date(),
+                    ends_sorted[i].date(),
+                    gap,
+                    Q_MIN,
+                    Q_MAX,
+                )
+                gaps_ok = False
+                break
+        if not gaps_ok:
+            continue
+
         q4_val = annual_val - q_in_year["val"].sum()
+
+        # Sanity check: |q4_val| > 2 * |annual_val| is a strong signal that the
+        # quarterly values don't belong to this fiscal year (e.g. double-counted
+        # or misattributed quarters after a restatement).
+        if annual_val != 0 and abs(q4_val) > abs(annual_val) * 2:
+            logger.warning(
+                "Skipping absurd Q4 derivation for FY end {}: q4_val={:.0f} exceeds "
+                "2x annual_val={:.0f}; likely misattributed quarterly rows",
+                fy_end.date(),
+                q4_val,
+                annual_val,
+            )
+            continue
+
         rows.append({"end": fy_end, "filed": k_filed, "val": q4_val})
 
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["end", "filed", "val"])
