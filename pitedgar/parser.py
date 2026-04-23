@@ -9,7 +9,7 @@ import pandas as pd
 from loguru import logger
 from tqdm import tqdm
 
-from pitedgar.config import CONCEPT_ALIASES, PitEdgarConfig
+from pitedgar.config import CONCEPT_ALIASES, LOSSY_CONCEPT_ALIASES, PitEdgarConfig
 from pitedgar.periods import is_quarterly
 
 # Units to attempt per concept, in priority order.
@@ -32,23 +32,46 @@ def parse_company(
     concepts: list[str] | None,
     facts_dir: Path,
     forms: list[str],
+    alias_map: dict[str, str] | None = None,
+    lossy_alias_map: dict[str, str] | None = None,
 ) -> pd.DataFrame:
     """Parse a single company's JSON into a tidy PIT DataFrame.
 
     Args:
-        cik_padded: zero-padded 10-digit CIK string.
-        concepts:   list of "us-gaap:ConceptName" strings to extract. Pass ``None``
-                    or an empty list to extract every us-gaap concept present in
-                    the JSON (recommended — the full parquet supports flexible
-                    quant signal iteration without re-parsing the 1.5 GB cache).
-        facts_dir:  directory containing CIK*.json files.
-        forms:      filing forms to keep, e.g. ["10-K", "10-Q"].
+        cik_padded:      zero-padded 10-digit CIK string.
+        concepts:        list of "us-gaap:ConceptName" strings to extract. Pass
+                         ``None`` or an empty list to extract every us-gaap concept
+                         present in the JSON (recommended — the full parquet supports
+                         flexible quant signal iteration without re-parsing the 1.5 GB
+                         cache).
+        facts_dir:       directory containing CIK*.json files.
+        forms:           filing forms to keep, e.g. ["10-K", "10-Q"].
+        alias_map:       non-lossy alias dict to use (defaults to
+                         ``CONCEPT_ALIASES``).  Pass an explicit dict (possibly
+                         empty) to override in tests.
+        lossy_alias_map: lossy alias dict to merge in when the caller has enabled
+                         them (defaults to ``{}``).  Rows produced via a lossy alias
+                         carry the original tag name in the ``alias_source`` column.
 
     Returns:
-        DataFrame with columns: cik, concept, end, filed, val, form, accn.
+        DataFrame with columns: cik, concept, start, end, duration_days, filed,
+        val, form, accn, scale_corrected, alias_source.
         The ``concept`` column always contains the canonical full name
         ``"us-gaap:<Name>"`` — alias tags are mapped to their canonical target.
+        ``alias_source`` is ``None`` for native / non-lossy-alias rows, and the
+        original tag string (e.g. ``"us-gaap:ProfitLoss"``) for lossy-alias rows.
     """
+    # Resolve effective alias maps.
+    effective_alias_map: dict[str, str] = CONCEPT_ALIASES if alias_map is None else alias_map
+    effective_lossy_map: dict[str, str] = lossy_alias_map if lossy_alias_map is not None else {}
+    # Combined map used for tag → canonical resolution (lossy entries are also
+    # present so that the "None/empty concepts → parse all" code path handles them).
+    combined_alias_map: dict[str, str] = {**effective_alias_map, **effective_lossy_map}
+    # Set of lossy alias tags so we can mark rows and emit warnings.
+    lossy_tags: set[str] = set(effective_lossy_map)
+    # Track (cik, alias) pairs for which we have already emitted a warning.
+    warned_lossy: set[str] = set()
+
     json_path = facts_dir / f"CIK{cik_padded}.json"
     if not json_path.exists():
         logger.debug(f"No JSON for CIK {cik_padded}, skipping.")
@@ -69,7 +92,7 @@ def parse_company(
         canonical_set: set[str] = set()
         for short_name in usgaap:
             full_name = f"us-gaap:{short_name}"
-            canonical = CONCEPT_ALIASES.get(full_name, full_name)
+            canonical = combined_alias_map.get(full_name, full_name)
             canonical_set.add(canonical)
         concepts = sorted(canonical_set)
 
@@ -77,7 +100,7 @@ def parse_company(
 
     # Build reverse alias map: canonical -> [alias, ...]
     alias_lookup: dict[str, list[str]] = {c: [] for c in concepts}
-    for alias, canonical in CONCEPT_ALIASES.items():
+    for alias, canonical in combined_alias_map.items():
         if canonical in alias_lookup:
             alias_lookup[canonical].append(alias)
 
@@ -112,6 +135,19 @@ def parse_company(
             if not unit_entries:
                 continue
 
+            # Determine alias_source for this candidate.
+            is_lossy = candidate_full in lossy_tags
+            alias_source_value: str | None = candidate_full if is_lossy else None
+
+            # Emit a per-(cik, alias) warning the first time a lossy alias fires.
+            if is_lossy and candidate_full not in warned_lossy:
+                logger.warning(
+                    f"CIK {cik_padded}: lossy alias {candidate_full!r} → "
+                    f"{concept_full!r}; rows will have alias_source set. "
+                    "Enable lossy_aliases_enabled=True explicitly to suppress this warning."
+                )
+                warned_lossy.add(candidate_full)
+
             for entry in unit_entries:
                 form = entry.get("form", "")
                 if form not in forms:
@@ -133,6 +169,7 @@ def parse_company(
                         "val": float(val),
                         "form": form,
                         "accn": accn,
+                        "alias_source": alias_source_value,
                     }
                 )
 
@@ -212,22 +249,25 @@ def parse_company(
 
 
 def _parse_one_for_pool(
-    args: tuple[str, str, list[str] | None, Path, list[str]],
+    args: tuple[str, str, list[str] | None, Path, list[str], dict[str, str], dict[str, str]],
 ) -> tuple[str, pd.DataFrame]:
     """Top-level helper for ProcessPoolExecutor (must be picklable, hence not a closure).
 
     Args:
-        args: tuple of (ticker, cik_padded, concepts, facts_dir, forms).
+        args: tuple of (ticker, cik_padded, concepts, facts_dir, forms,
+              alias_map, lossy_alias_map).
 
     Returns:
         (ticker, parsed DataFrame). DataFrame may be empty.
     """
-    ticker, cik_padded, concepts, facts_dir, forms = args
+    ticker, cik_padded, concepts, facts_dir, forms, alias_map, lossy_alias_map = args
     df = parse_company(
         cik_padded=cik_padded,
         concepts=concepts,
         facts_dir=facts_dir,
         forms=forms,
+        alias_map=alias_map,
+        lossy_alias_map=lossy_alias_map,
     )
     return ticker, df
 
@@ -264,6 +304,11 @@ def parse_all(
     if n_workers < 1:
         raise ValueError(f"n_workers must be >= 1, got {n_workers}")
 
+    # Build effective alias maps once and thread them through to all workers.
+    effective_lossy_map: dict[str, str] = (
+        LOSSY_CONCEPT_ALIASES if config.lossy_aliases_enabled else {}
+    )
+
     all_frames: list[pd.DataFrame] = []
 
     if n_workers == 1:
@@ -275,6 +320,8 @@ def parse_all(
                 concepts=config.concepts,
                 facts_dir=config.facts_dir,
                 forms=config.forms,
+                alias_map=CONCEPT_ALIASES,
+                lossy_alias_map=effective_lossy_map,
             )
             if df.empty:
                 continue
@@ -283,7 +330,15 @@ def parse_all(
     else:
         # Parallel path: fan out across processes — JSON parsing is CPU-bound.
         tasks = [
-            (str(ticker), str(row["cik"]), config.concepts, config.facts_dir, config.forms)
+            (
+                str(ticker),
+                str(row["cik"]),
+                config.concepts,
+                config.facts_dir,
+                config.forms,
+                CONCEPT_ALIASES,
+                effective_lossy_map,
+            )
             for ticker, row in cik_map.iterrows()
         ]
         with ProcessPoolExecutor(max_workers=n_workers) as pool:

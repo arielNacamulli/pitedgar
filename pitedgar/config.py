@@ -26,6 +26,9 @@ DEFAULT_CONCEPTS = [
 # Applied at parse time so the parquet always uses canonical names. The parser tries
 # the canonical tag first, falling back to each alias only if the canonical is absent —
 # so when both are present the canonical value wins (no double-counting).
+#
+# Only genuinely synonymous / deprecated tags belong here.  Tags that are financially
+# non-equivalent to their canonical target are in LOSSY_CONCEPT_ALIASES below.
 CONCEPT_ALIASES: dict[str, str] = {
     # --- Revenue family -> us-gaap:Revenues ---
     # Post-ASC 606 standard tag (mandatory from 2018 onward for most filers)
@@ -36,23 +39,37 @@ CONCEPT_ALIASES: dict[str, str] = {
     "us-gaap:SalesRevenueNet": "us-gaap:Revenues",
     "us-gaap:SalesRevenueGoodsNet": "us-gaap:Revenues",
     "us-gaap:Revenue": "us-gaap:Revenues",
-    # --- Net income family -> us-gaap:NetIncomeLoss ---
-    # CAVEAT: ProfitLoss is NOT identical to NetIncomeLoss — ProfitLoss is the
-    # consolidated bottom line BEFORE allocating income to non-controlling (minority)
-    # interests, while NetIncomeLoss is attributable to the parent only. We map it
-    # as a fallback so companies that only file ProfitLoss are still represented;
-    # the canonical-first lookup ensures NetIncomeLoss wins whenever both are present.
-    "us-gaap:ProfitLoss": "us-gaap:NetIncomeLoss",
     # --- Cash family -> us-gaap:CashAndCashEquivalentsAtCarryingValue ---
-    # Post-ASU 2016-18 tag that bundles restricted cash with cash & equivalents
-    "us-gaap:CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents": "us-gaap:CashAndCashEquivalentsAtCarryingValue",
     # Bare "Cash" tag used by a minority of filers (typically smaller / older filings)
     "us-gaap:Cash": "us-gaap:CashAndCashEquivalentsAtCarryingValue",
-    # --- Long-term debt -> us-gaap:LongTermDebt ---
-    # Many filers report only the noncurrent portion under this tag
-    "us-gaap:LongTermDebtNoncurrent": "us-gaap:LongTermDebt",
     # --- Operating cash flow ---
     "us-gaap:OperatingCashFlow": "us-gaap:NetCashProvidedByUsedInOperatingActivities",
+}
+
+# Aliases that are financially NON-EQUIVALENT to their canonical targets.
+# These are kept separate because substituting them silently can mislead analysts:
+#
+#   ProfitLoss → NetIncomeLoss
+#       ProfitLoss is the consolidated bottom line BEFORE allocating income to
+#       non-controlling (minority) interests; NetIncomeLoss is attributable to
+#       the parent only.
+#
+#   LongTermDebtNoncurrent → LongTermDebt
+#       LongTermDebtNoncurrent excludes the current portion of long-term debt;
+#       LongTermDebt includes it.
+#
+#   CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents
+#       → CashAndCashEquivalentsAtCarryingValue
+#       The post-ASU 2016-18 tag bundles restricted cash with unrestricted cash,
+#       inflating the figure relative to the canonical carrying-value tag.
+#
+# These aliases are DISABLED by default (PitEdgarConfig.lossy_aliases_enabled=False).
+# When enabled the parser records the original tag in the `alias_source` column so
+# analysts can filter or audit the substitutions.
+LOSSY_CONCEPT_ALIASES: dict[str, str] = {
+    "us-gaap:ProfitLoss": "us-gaap:NetIncomeLoss",
+    "us-gaap:CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents": "us-gaap:CashAndCashEquivalentsAtCarryingValue",
+    "us-gaap:LongTermDebtNoncurrent": "us-gaap:LongTermDebt",
 }
 
 # Amendments (10-K/A, 10-Q/A) carry corrected — and often substantially restated —
@@ -77,6 +94,11 @@ class PitEdgarConfig(BaseModel):
     # explicit list (e.g. ``DEFAULT_CONCEPTS``) to opt back into the curated subset.
     concepts: list[str] | None = None
     forms: list[str] = DEFAULT_FORMS
+    # When False (default) the three financially non-equivalent aliases in
+    # LOSSY_CONCEPT_ALIASES are NOT applied, so a filer that only reports e.g.
+    # ProfitLoss will have no rows for us-gaap:NetIncomeLoss.  Set to True to
+    # apply them anyway (rows will carry the original tag in `alias_source`).
+    lossy_aliases_enabled: bool = False
 
     model_config = {"arbitrary_types_allowed": True}
 

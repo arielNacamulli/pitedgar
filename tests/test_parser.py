@@ -5,7 +5,7 @@ import json
 import pandas as pd
 import pytest
 
-from pitedgar.config import DEFAULT_CONCEPTS, PitEdgarConfig
+from pitedgar.config import DEFAULT_CONCEPTS, LOSSY_CONCEPT_ALIASES, PitEdgarConfig
 from pitedgar.parser import parse_all, parse_company
 
 SAMPLE_FACTS = {
@@ -91,6 +91,7 @@ def test_parse_company_returns_correct_columns(facts_dir):
         "form",
         "accn",
         "scale_corrected",
+        "alias_source",
     }
 
 
@@ -1040,3 +1041,118 @@ def test_parse_all_invalid_n_workers(tmp_path):
     )
     with pytest.raises(ValueError, match="n_workers"):
         parse_all(config, cik_map, n_workers=0)
+
+
+# ---------------------------------------------------------------------------
+# Lossy alias tests (issue #14)
+# ---------------------------------------------------------------------------
+
+def _profit_loss_facts(val: int = 500_000_000) -> dict:
+    """Minimal facts dict with ONLY ProfitLoss (no NetIncomeLoss)."""
+    return {
+        "facts": {
+            "us-gaap": {
+                "ProfitLoss": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2023-01-01",
+                                "end": "2023-12-31",
+                                "filed": "2024-02-01",
+                                "val": val,
+                                "form": "10-K",
+                                "accn": "PL1",
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+    }
+
+
+def test_lossy_alias_disabled_by_default(tmp_path):
+    """A filer with ONLY ProfitLoss and lossy aliases disabled (default) must
+    produce NO rows for us-gaap:NetIncomeLoss."""
+    cik = "0000001001"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(_profit_loss_facts()), encoding="utf-8")
+
+    # lossy_alias_map defaults to {} (disabled)
+    df = parse_company(cik, ["us-gaap:NetIncomeLoss"], tmp_path, ["10-K"])
+    assert df.empty or "us-gaap:NetIncomeLoss" not in set(df.get("concept", pd.Series(dtype=str)))
+
+
+def test_lossy_alias_enabled_substitutes_with_marker(tmp_path):
+    """Same filer with lossy_aliases_enabled produces rows AND alias_source is set."""
+    cik = "0000001002"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(_profit_loss_facts(600_000_000)), encoding="utf-8")
+
+    df = parse_company(
+        cik,
+        ["us-gaap:NetIncomeLoss"],
+        tmp_path,
+        ["10-K"],
+        lossy_alias_map=LOSSY_CONCEPT_ALIASES,
+    )
+    assert len(df) == 1
+    assert df.iloc[0]["concept"] == "us-gaap:NetIncomeLoss"
+    assert df.iloc[0]["val"] == pytest.approx(600_000_000)
+    assert df.iloc[0]["alias_source"] == "us-gaap:ProfitLoss"
+
+
+def test_non_lossy_alias_unmarked(tmp_path):
+    """A filer using SalesRevenueNet (non-lossy alias) must have alias_source == None."""
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "SalesRevenueNet": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2017-01-01",
+                                "end": "2017-12-31",
+                                "filed": "2018-02-15",
+                                "val": 300_000_000,
+                                "form": "10-K",
+                                "accn": "SRN9",
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    cik = "0000001003"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+
+    df = parse_company(cik, ["us-gaap:Revenues"], tmp_path, ["10-K"])
+    assert len(df) == 1
+    assert df.iloc[0]["concept"] == "us-gaap:Revenues"
+    # Non-lossy alias — alias_source must be None (pandas stores as None/NaN)
+    assert df.iloc[0]["alias_source"] is None
+
+
+def test_lossy_alias_warning_logged_once_per_cik(tmp_path):
+    """A lossy alias must trigger exactly one logger.warning per (cik, alias)."""
+    from loguru import logger
+
+    cik = "0000001004"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(_profit_loss_facts()), encoding="utf-8")
+
+    captured: list[str] = []
+
+    sink_id = logger.add(lambda msg: captured.append(msg), level="WARNING", format="{message}")
+    try:
+        parse_company(
+            cik,
+            ["us-gaap:NetIncomeLoss"],
+            tmp_path,
+            ["10-K"],
+            lossy_alias_map=LOSSY_CONCEPT_ALIASES,
+        )
+    finally:
+        logger.remove(sink_id)
+
+    # Exactly one warning mentioning ProfitLoss should appear.
+    profit_loss_warnings = [m for m in captured if "ProfitLoss" in m]
+    assert len(profit_loss_warnings) == 1
