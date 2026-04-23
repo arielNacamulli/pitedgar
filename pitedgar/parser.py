@@ -104,8 +104,19 @@ def parse_company(
             # Pick the preferred unit per candidate (USD vs shares). This runs
             # independently for each candidate so e.g. a share-concept alias
             # reported in "shares" is still picked up alongside the canonical.
+            # Build the ordered list of units to try: canonical-class first, then
+            # any additional preferences from the candidate's own class (relevant
+            # when a future cross-class alias maps a share-denominated tag onto a
+            # USD canonical, or vice-versa).  Duplicates are removed while
+            # preserving order so canonical preferences still take priority.
+            units_to_try = _preferred_units(canonical_short)
+            if concept_short != canonical_short:
+                for u in _preferred_units(concept_short):
+                    if u not in units_to_try:
+                        units_to_try.append(u)
+
             unit_entries: list[dict] | None = None
-            for unit_key in _preferred_units(canonical_short):
+            for unit_key in units_to_try:
                 if unit_key in units_dict:
                     unit_entries = units_dict[unit_key]
                     break
