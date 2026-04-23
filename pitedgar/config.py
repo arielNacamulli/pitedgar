@@ -1,8 +1,13 @@
 """Configuration for pitedgar via Pydantic BaseModel."""
 
+import re
 from pathlib import Path
 
 from pydantic import BaseModel, model_validator
+
+_EDGAR_IDENTITY_RE = re.compile(
+    r"^[\w.\-']+(?:\s+[\w.\-']+)*\s+[\w.+\-]+@[\w.\-]+\.[a-zA-Z]{2,}\s*$"
+)
 
 DEFAULT_CONCEPTS = [
     "us-gaap:Revenues",
@@ -88,8 +93,19 @@ class PitEdgarConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_edgar_identity(self) -> "PitEdgarConfig":
-        if not self.edgar_identity or not self.edgar_identity.strip():
-            raise ValueError("edgar_identity must be a non-empty SEC User-Agent string")
+        value = (self.edgar_identity or "").strip()
+        if not value:
+            raise ValueError(
+                "edgar_identity must be a non-empty SEC User-Agent string, "
+                "formatted as 'Name email@domain.tld'. "
+                "See https://www.sec.gov/os/accessing-edgar-data"
+            )
+        if not _EDGAR_IDENTITY_RE.match(value):
+            raise ValueError(
+                f"edgar_identity must match SEC format 'Name email@domain.tld'. "
+                f"Got: {value!r}. "
+                f"See https://www.sec.gov/os/accessing-edgar-data"
+            )
         return self
 
     def ensure_dirs(self) -> None:
