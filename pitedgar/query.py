@@ -3,8 +3,23 @@
 from pathlib import Path
 
 import pandas as pd
+from loguru import logger
 
 from pitedgar.periods import Q_MAX, Q_MIN, is_annual, is_quarterly
+
+# Balance-sheet concepts that carry instant (point-in-time) values.
+# Used by the legacy-parquet fallback: these should get duration_days=-1
+# (not the form-derived 365) so they are excluded from is_annual / TTM filters.
+_BALANCE_SHEET_CONCEPTS: frozenset[str] = frozenset(
+    {
+        "us-gaap:Assets",
+        "us-gaap:Liabilities",
+        "us-gaap:StockholdersEquity",
+        "us-gaap:CashAndCashEquivalentsAtCarryingValue",
+        "us-gaap:LongTermDebt",
+        "us-gaap:CommonStockSharesOutstanding",
+    }
+)
 
 
 def _snapshot_events(grp: pd.DataFrame) -> pd.DataFrame:
@@ -247,9 +262,26 @@ class PitQuery:
             self.data["start"] = pd.to_datetime(self.data["start"], errors="coerce")
         # Ensure duration_days exists for period classification. The parser always
         # writes this column; for test fixtures or legacy parquets without it,
-        # infer from form (10-Q → 91, 10-K → 365) as a safe approximation.
+        # infer heuristically.
         if "duration_days" not in self.data.columns:
-            self.data["duration_days"] = self.data["form"].map({"10-Q": 91, "10-K": 365}).fillna(-1)
+            # Prefer real start→end difference when start is available.
+            has_start = (
+                "start" in self.data.columns and self.data["start"].notna().any()
+            )
+            if has_start:
+                self.data["duration_days"] = (
+                    (self.data["end"] - self.data["start"]).dt.days.fillna(-1).astype(int)
+                )
+            else:
+                # Heuristic fallback: assign -1 (instant) to known balance-sheet
+                # concepts so they are not misclassified as annual flow rows.
+                form_map = self.data["form"].map({"10-Q": 91, "10-K": 365}).fillna(-1)
+                bs_mask = self.data["concept"].isin(_BALANCE_SHEET_CONCEPTS)
+                self.data["duration_days"] = form_map.where(~bs_mask, -1).astype(int)
+            logger.warning(
+                "Parquet lacks `duration_days` — inferred heuristically. "
+                "Re-run `pitedgar build --force` with v0.4+ to get precise values."
+            )
 
     # ------------------------------------------------------------------
     # Public API

@@ -3,6 +3,7 @@
 import pandas as pd
 import pytest
 
+from pitedgar.periods import is_annual
 from pitedgar.query import PitQuery
 
 CONCEPT = "us-gaap:Revenues"
@@ -1229,3 +1230,94 @@ def test_ttm_cross_section_matches_ttm_on_ytd_universe(tmp_path):
             assert pd.isna(row["ttm_val"])
         else:
             assert row["ttm_val"] == pytest.approx(expected, rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Legacy parquet fallback (issue #27)
+# ---------------------------------------------------------------------------
+
+
+def _legacy_parquet(tmp_path, concept: str) -> "PitQuery":
+    """Build a parquet WITHOUT `duration_days` and WITHOUT `start` columns."""
+    records = [
+        {
+            "ticker": "AAPL",
+            "concept": concept,
+            "end": "2022-12-31",
+            "filed": "2023-02-02",
+            "val": 1_000.0,
+            "form": "10-K",
+            "accn": "X1",
+        }
+    ]
+    df = pd.DataFrame(records)
+    # Ensure the parquet has neither duration_days nor start.
+    assert "duration_days" not in df.columns
+    assert "start" not in df.columns
+    path = tmp_path / "pit_legacy.parquet"
+    df.to_parquet(path, index=False)
+    return PitQuery(path)
+
+
+def test_legacy_parquet_balance_sheet_not_annual(tmp_path):
+    """Assets in a 10-K legacy parquet must NOT be classified as annual (is_annual=False)."""
+    q = _legacy_parquet(tmp_path, "us-gaap:Assets")
+    row = q.data.iloc[0]
+    assert not is_annual(
+        pd.Series([row["duration_days"]]), pd.Series([row["form"]])
+    ).iloc[0]
+
+
+def test_legacy_parquet_revenues_still_annual(tmp_path):
+    """Revenues in a 10-K legacy parquet must be classified as annual (duration_days=365)."""
+    q = _legacy_parquet(tmp_path, "us-gaap:Revenues")
+    row = q.data.iloc[0]
+    assert int(row["duration_days"]) == 365
+    assert is_annual(
+        pd.Series([row["duration_days"]]), pd.Series([row["form"]])
+    ).iloc[0]
+
+
+def test_legacy_parquet_with_start_uses_real_duration(tmp_path):
+    """When `start` is present but `duration_days` is absent, use end−start diff."""
+    records = [
+        {
+            "ticker": "AAPL",
+            "concept": "us-gaap:Revenues",
+            "start": "2022-01-01",
+            "end": "2022-03-31",
+            "filed": "2022-04-28",
+            "val": 500.0,
+            "form": "10-Q",
+            "accn": "Y1",
+        }
+    ]
+    df = pd.DataFrame(records)
+    assert "duration_days" not in df.columns
+    path = tmp_path / "pit_legacy_start.parquet"
+    df.to_parquet(path, index=False)
+    q = PitQuery(path)
+    row = q.data.iloc[0]
+    expected = (pd.Timestamp("2022-03-31") - pd.Timestamp("2022-01-01")).days
+    assert int(row["duration_days"]) == expected
+
+
+def test_legacy_parquet_warns_once(tmp_path):
+    """PitQuery must emit a warning mentioning duration_days when it is missing."""
+    from loguru import logger
+
+    captured: list[str] = []
+
+    def _sink(message):
+        if message.record["level"].name == "WARNING":
+            captured.append(message.record["message"])
+
+    handler_id = logger.add(_sink, level="WARNING")
+    try:
+        _legacy_parquet(tmp_path, "us-gaap:Assets")
+    finally:
+        logger.remove(handler_id)
+
+    assert any("duration_days" in m for m in captured), (
+        f"Expected a duration_days warning, got: {captured}"
+    )
