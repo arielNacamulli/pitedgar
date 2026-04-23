@@ -1040,3 +1040,48 @@ def test_parse_all_invalid_n_workers(tmp_path):
     )
     with pytest.raises(ValueError, match="n_workers"):
         parse_all(config, cik_map, n_workers=0)
+
+
+# ---------------------------------------------------------------------------
+# is_scale_corrected helper tests (issue #31)
+# ---------------------------------------------------------------------------
+
+def test_is_scale_corrected_returns_boolean_series():
+    """Mixed scale_corrected column returns correct True/False mask."""
+    from pitedgar.parser import is_scale_corrected
+
+    df = pd.DataFrame({
+        "val": [1_000_000, 2_000_000, 3_000_000],
+        "scale_corrected": [True, False, True],
+    })
+    result = is_scale_corrected(df)
+
+    assert isinstance(result, pd.Series)
+    assert result.dtype == bool
+    assert list(result) == [True, False, True]
+    assert result.index.equals(df.index)
+
+
+def test_is_scale_corrected_missing_column_returns_false_series():
+    """Legacy parquet without scale_corrected column yields an all-False series."""
+    from pitedgar.parser import is_scale_corrected
+
+    df = pd.DataFrame({
+        "val": [1_000_000, 2_000_000],
+        "concept": ["us-gaap:Revenues", "us-gaap:Assets"],
+    })
+    result = is_scale_corrected(df)
+
+    assert isinstance(result, pd.Series)
+    assert result.dtype == bool
+    assert not result.any()
+    assert result.index.equals(df.index)
+
+
+def test_is_scale_corrected_exported_from_package():
+    """is_scale_corrected must be importable from both pitedgar.parser and pitedgar."""
+    from pitedgar.parser import is_scale_corrected as from_parser
+    import pitedgar
+
+    assert hasattr(pitedgar, "is_scale_corrected")
+    assert pitedgar.is_scale_corrected is from_parser

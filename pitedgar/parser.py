@@ -27,6 +27,25 @@ def _preferred_units(concept_short: str) -> list[str]:
     return ["USD", "shares"]
 
 
+def is_scale_corrected(df: pd.DataFrame) -> pd.Series:
+    """Boolean series indicating which rows had the 1000x scale correction applied.
+
+    Use this to filter or exclude corrected rows when merging parquets from
+    different parse runs, since the correction is applied in-place and not
+    re-detectable from values alone.
+
+    Args:
+        df: DataFrame produced by :func:`parse_company` or :func:`parse_all`.
+
+    Returns:
+        Boolean :class:`pandas.Series` aligned to ``df.index``.  All-False when
+        ``df`` is a legacy parquet that pre-dates the ``scale_corrected`` column.
+    """
+    if "scale_corrected" not in df.columns:
+        return pd.Series(False, index=df.index)
+    return df["scale_corrected"].astype(bool)
+
+
 def parse_company(
     cik_padded: str,
     concepts: list[str] | None,
@@ -48,6 +67,13 @@ def parse_company(
         DataFrame with columns: cik, concept, end, filed, val, form, accn.
         The ``concept`` column always contains the canonical full name
         ``"us-gaap:<Name>"`` — alias tags are mapped to their canonical target.
+
+    Note:
+        The ``scale_corrected`` column is an audit marker.  Do NOT re-run scale
+        detection on an already-parsed parquet — use
+        :func:`pitedgar.parser.is_scale_corrected` to identify affected rows
+        before merging with another parse.  Merging two already-scaled parquets
+        and re-applying scale detection would double-multiply small-value CIKs.
     """
     json_path = facts_dir / f"CIK{cik_padded}.json"
     if not json_path.exists():
