@@ -984,6 +984,122 @@ def test_history_returns_latest_filed_per_end(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# history() as_of PIT correctness (issue #13)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def restatement_history_parquet(tmp_path):
+    """Q1 original + Q1 restatement + a future 10-K for history() as_of tests."""
+    records = [
+        # Q1 original filing
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-03-31",
+            "filed": "2023-04-28",
+            "val": 100.0,
+            "form": "10-Q",
+            "accn": "H_ORIG",
+        },
+        # Q1 restatement filed in August
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-03-31",
+            "filed": "2023-08-01",
+            "val": 110.0,
+            "form": "10-Q",
+            "accn": "H_RESTATE",
+        },
+        # 10-K filed in February 2024 — must not appear in as_of="2023-12-31"
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-12-31",
+            "filed": "2024-02-01",
+            "val": 999.0,
+            "form": "10-K",
+            "accn": "H_10K",
+        },
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    return path
+
+
+def test_history_as_of_before_restatement_returns_original(restatement_history_parquet):
+    """history(as_of=...) before the restatement must return the original Q1 value."""
+    q = PitQuery(restatement_history_parquet)
+    h = q.history("AAPL", CONCEPT, as_of="2023-06-01", freq="Q")
+    assert len(h) == 1
+    q1 = h[h["end"] == pd.Timestamp("2023-03-31")].iloc[0]
+    assert q1["val"] == pytest.approx(100.0)
+
+
+def test_history_as_of_after_restatement_returns_restated(restatement_history_parquet):
+    """history(as_of=...) after the restatement must return the restated Q1 value."""
+    q = PitQuery(restatement_history_parquet)
+    h = q.history("AAPL", CONCEPT, as_of="2023-09-01", freq="Q")
+    assert len(h) == 1
+    q1 = h[h["end"] == pd.Timestamp("2023-03-31")].iloc[0]
+    assert q1["val"] == pytest.approx(110.0)
+
+
+def test_history_as_of_excludes_future_filings(restatement_history_parquet):
+    """history(as_of="2023-12-31") must NOT include the 10-K filed 2024-02-01."""
+    q = PitQuery(restatement_history_parquet)
+    # Use freq="all" (not "Q" or "A") so the 10-K wouldn't be filtered by duration.
+    h = q.history("AAPL", CONCEPT, as_of="2023-12-31", freq="all")
+    assert len(h) == 1
+    assert pd.Timestamp("2024-02-01") not in h["filed"].values
+    assert h.iloc[0]["end"] == pd.Timestamp("2023-03-31")
+
+
+def test_history_as_of_default_none_keeps_legacy_behaviour(tmp_path):
+    """Without as_of, history() returns the globally latest-filed value per end (non-PIT legacy)."""
+    records = [
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-03-31",
+            "filed": "2023-04-28",
+            "val": 50.0,
+            "form": "10-Q",
+            "accn": "H1",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-03-31",
+            "filed": "2023-06-01",
+            "val": 55.0,
+            "form": "10-Q",
+            "accn": "H2",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-06-30",
+            "filed": "2023-07-28",
+            "val": 60.0,
+            "form": "10-Q",
+            "accn": "H3",
+        },
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    q = PitQuery(path)
+    h = q.history("AAPL", CONCEPT, freq="Q")
+    assert len(h) == 2  # one row per period end
+    q1 = h[h["end"] == pd.Timestamp("2023-03-31")].iloc[0]
+    # Latest-filed restatement (55.0), not original (50.0)
+    assert q1["val"] == pytest.approx(55.0)
+
+
+# ---------------------------------------------------------------------------
 # YTD-chain synthesis (AAPL post-2021 pattern)
 # ---------------------------------------------------------------------------
 
