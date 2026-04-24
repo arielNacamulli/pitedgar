@@ -149,8 +149,15 @@ def parse_company(
             if concept_data is None:
                 continue
             units_dict: dict = concept_data.get("units", {})
+            # Union canonical-class and candidate-class unit preferences so a
+            # cross-class alias still finds its entries. Canonical takes priority.
+            units_to_try = _preferred_units(canonical_short)
+            if concept_short != canonical_short:
+                for u in _preferred_units(concept_short):
+                    if u not in units_to_try:
+                        units_to_try.append(u)
             unit_entries: list[dict] | None = None
-            for unit_key in _preferred_units(canonical_short):
+            for unit_key in units_to_try:
                 if unit_key in units_dict:
                     unit_entries = units_dict[unit_key]
                     break

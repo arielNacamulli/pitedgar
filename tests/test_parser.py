@@ -1540,3 +1540,90 @@ def test_dedup_share_concept_tolerates_float_drift(tmp_path):
     df = parse_company(cik, ["us-gaap:EarningsPerShareBasic"], tmp_path, ["10-K"])
     assert len(df) == 1
     assert df.iloc[0]["accn"] == "EP1"
+
+
+# ---------------------------------------------------------------------------
+# Tests for _preferred_units helper and cross-class alias unit selection
+# ---------------------------------------------------------------------------
+
+def test_preferred_units_share_concepts_ordering():
+    """Share concepts must prefer 'shares' first; all others must prefer 'USD' first."""
+    from pitedgar.parser import _preferred_units
+
+    # Share concepts — shares must come first
+    assert _preferred_units("EarningsPerShareBasic")[0] == "shares"
+    assert _preferred_units("EarningsPerShareDiluted")[0] == "shares"
+    assert _preferred_units("CommonStockSharesOutstanding")[0] == "shares"
+
+    # Non-share concepts — USD must come first
+    assert _preferred_units("Revenues")[0] == "USD"
+    assert _preferred_units("NetIncomeLoss")[0] == "USD"
+    assert _preferred_units("SomeUnknownConcept")[0] == "USD"
+
+
+def test_unit_selection_supports_cross_class_alias(tmp_path, monkeypatch):
+    """A share-denominated alias whose canonical is a USD concept must still be
+    picked up, because units_to_try is now the union of canonical-class and
+    candidate-class preferences (canonical-class first).
+
+    We register a temporary alias  us-gaap:FakeSharesAlias -> us-gaap:Revenues
+    via monkeypatch.  The JSON fixture has FakeSharesAlias data only in 'shares'
+    units.  Without the fix the parser would look for 'USD' only (canonical class)
+    and silently skip the entry; with the fix it falls through to 'shares' and
+    picks it up.
+    """
+    import pitedgar.config as config_mod
+    import pitedgar.parser as parser_mod
+
+    # Register the cross-class alias in CONCEPT_ALIASES and CONCEPT_ALIAS_PRIORITY
+    patched_aliases = dict(config_mod.CONCEPT_ALIASES)
+    patched_aliases["us-gaap:FakeSharesAlias"] = "us-gaap:Revenues"
+    patched_priority = {
+        k: list(v) for k, v in config_mod.CONCEPT_ALIAS_PRIORITY.items()
+    }
+    patched_priority.setdefault("us-gaap:Revenues", []).append("us-gaap:FakeSharesAlias")
+    monkeypatch.setattr(config_mod, "CONCEPT_ALIASES", patched_aliases)
+    monkeypatch.setattr(parser_mod, "CONCEPT_ALIASES", patched_aliases)
+    monkeypatch.setattr(config_mod, "CONCEPT_ALIAS_PRIORITY", patched_priority)
+    monkeypatch.setattr(parser_mod, "CONCEPT_ALIAS_PRIORITY", patched_priority)
+
+    facts = {
+        "facts": {
+            "us-gaap": {
+                # Only the alias tag present, reported in 'shares' units (cross-class)
+                "FakeSharesAlias": {
+                    "units": {
+                        "shares": [
+                            {
+                                "start": "2023-01-01",
+                                "end": "2023-12-31",
+                                "filed": "2024-02-01",
+                                "val": 999_000_000,
+                                "form": "10-K",
+                                "accn": "XA1",
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    cik = "0000000200"
+    (tmp_path / f"CIK{cik}.json").write_text(__import__("json").dumps(facts), encoding="utf-8")
+
+    df = parser_mod.parse_company(cik, ["us-gaap:Revenues"], tmp_path, ["10-K"])
+    # The cross-class alias entry must be found and stored under the canonical concept
+    assert len(df) == 1
+    assert df.iloc[0]["concept"] == "us-gaap:Revenues"
+    assert df.iloc[0]["val"] == pytest.approx(999_000_000)
+    assert df.iloc[0]["accn"] == "XA1"
+
+
+def test_parse_company_share_concept_uses_shares_units_regression(facts_dir):
+    """Regression guard: CommonStockSharesOutstanding (a share concept) must still
+    resolve through 'shares' units when the canonical concept is itself a share concept.
+    The units_to_try union must not alter existing canonical-first behaviour."""
+    # Reuse the top-level fixture which has EarningsPerShareBasic in 'shares'
+    df = parse_company("0000320193", ["us-gaap:EarningsPerShareBasic"], facts_dir, ["10-K"])
+    assert len(df) == 1
+    assert df.iloc[0]["val"] == pytest.approx(5.5)
