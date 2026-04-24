@@ -107,21 +107,10 @@ class PitEdgarConfig(BaseModel):
     # explicit list (e.g. ``DEFAULT_CONCEPTS``) to opt back into the curated subset.
     concepts: list[str] | None = None
     forms: list[str] = DEFAULT_FORMS
-    # Scale correction controls whether USD values are multiplied ×1000 when they
-    # appear to have been reported in thousands instead of dollars.
-    #
-    # "off"   — never apply any correction (default; protects legitimate micro/nano-caps).
-    # "auto"  — apply 1000x correction only when at least TWO distinct USD concepts
-    #           are ALL below ``scale_correction_threshold``; emits a warning.
-    # "force" — always multiply USD values ×1000 regardless of threshold (use for
-    #           filers known a priori to report in thousands).
     scale_correction: Literal["off", "auto", "force"] = "off"
     scale_correction_threshold: float = 1_000_000.0
-    # When False (default) the three financially non-equivalent aliases in
-    # LOSSY_CONCEPT_ALIASES are NOT applied, so a filer that only reports e.g.
-    # ProfitLoss will have no rows for us-gaap:NetIncomeLoss. Set to True to apply
-    # them anyway (rows will carry the original tag in the `alias_source` column).
     lossy_aliases_enabled: bool = False
+    max_extracted_bytes: int = 25 * 1024**3  # 25 GiB decompressed-size cap (zip-bomb guard)
 
     model_config = {"arbitrary_types_allowed": True}
 

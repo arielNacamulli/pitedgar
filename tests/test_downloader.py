@@ -399,3 +399,50 @@ def test_extraction_accepts_legitimate_nested_path(config):
         result = download_bulk(config, force=False)
 
     assert (result / "subdir" / "file.json").exists()
+from pitedgar.downloader import _check_zip_size, download_bulk
+
+
+# ---------------------------------------------------------------------------
+# Zip-bomb size-cap tests (#20)
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_zip_with_sizes(file_sizes: list[int]) -> MagicMock:
+    """Return a mock ZipFile whose infolist() reports the given declared sizes."""
+    infos = []
+    for i, size in enumerate(file_sizes):
+        info = MagicMock(spec=zipfile.ZipInfo)
+        info.filename = f"file_{i}.json"
+        info.file_size = size
+        infos.append(info)
+    zf = MagicMock(spec=zipfile.ZipFile)
+    zf.infolist.return_value = infos
+    return zf
+
+
+def test_extraction_rejects_oversized_zip():
+    """Total declared decompressed size above the configured cap raises RuntimeError."""
+    # Three members totalling 301 bytes, cap is 300 bytes.
+    zf = _make_mock_zip_with_sizes([100, 100, 101])
+    with pytest.raises(RuntimeError, match="Zip decompressed size"):
+        _check_zip_size(zf, limit=300)
+
+
+def test_extraction_accepts_reasonable_zip():
+    """A ZIP whose total size is within the default cap passes without error."""
+    # Build a real tiny ZIP in memory and run _check_zip_size against it.
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as zf_write:
+        zf_write.writestr("a.json", '{"key": "value"}')
+    buf.seek(0)
+    with zipfile.ZipFile(buf, "r") as zf_read:
+        # Default cap is 25 GiB — a tiny ZIP must pass with no exception.
+        _check_zip_size(zf_read, limit=25 * 1024**3)
+
+
+def test_extraction_rejects_huge_single_file():
+    """A single member declaring > 10 GiB raises RuntimeError regardless of total cap."""
+    huge = 11 * 1024**3  # 11 GiB > 10 GiB single-file limit
+    zf = _make_mock_zip_with_sizes([huge])
+    with pytest.raises(RuntimeError, match="Zip decompressed size|single-file cap"):
+        _check_zip_size(zf, limit=100 * 1024**3)  # generous total cap

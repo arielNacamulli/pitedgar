@@ -157,29 +157,41 @@ def _write_sidecars(zip_path: Path, resp_headers: dict[str, str]) -> None:
 
 
 def _verify_sidecar(zip_path: Path) -> None:
-    """Compare the on-disk ZIP against its .sha256 sidecar (if present).
-
-    - Sidecar missing  → log a warning and proceed (legacy cache).
-    - Sidecar present, digest matches → proceed normally.
-    - Sidecar present, digest mismatch → raise RuntimeError.
-    """
+    """Compare the on-disk ZIP against its .sha256 sidecar (if present)."""
     sha256_path = zip_path.with_suffix(zip_path.suffix + ".sha256")
     if not sha256_path.exists():
         logger.warning(
-            f"No SHA-256 sidecar found for {zip_path}. "
-            "Skipping integrity check (legacy cache). "
-            "Re-run with force=True to regenerate the sidecar."
+            f"No SHA-256 sidecar found for {zip_path}. Skipping integrity check (legacy cache)."
         )
         return
     expected = sha256_path.read_text().strip()
     actual = _compute_sha256(zip_path)
     if actual != expected:
         raise RuntimeError(
-            f"SHA-256 mismatch for {zip_path}: "
-            f"expected {expected!r} but got {actual!r}. "
-            "The cached ZIP may be corrupted — re-run with --force to re-download."
+            f"SHA-256 mismatch for {zip_path}: expected {expected!r} but got {actual!r}. "
+            "Re-run with --force to re-download."
         )
     logger.debug(f"SHA-256 verified for {zip_path}: {actual[:16]}…")
+
+
+_SINGLE_FILE_LIMIT_BYTES = 10 * 1024**3  # 10 GiB — no legitimate SEC JSON comes close
+
+
+def _check_zip_size(zf: zipfile.ZipFile, limit: int) -> None:
+    """Reject ZIP archives whose declared decompressed size looks like a zip bomb."""
+    total = 0
+    for info in zf.infolist():
+        if info.file_size > _SINGLE_FILE_LIMIT_BYTES:
+            raise RuntimeError(
+                f"ZIP member '{info.filename}' declares decompressed size "
+                f"{info.file_size:,} bytes which exceeds the single-file cap "
+                f"{_SINGLE_FILE_LIMIT_BYTES:,} bytes — possible zip bomb"
+            )
+        total += info.file_size
+    if total > limit:
+        raise RuntimeError(
+            f"Zip decompressed size {total:,} exceeds cap {limit:,} bytes — possible zip bomb"
+        )
 
 
 def download_bulk(config: PitEdgarConfig, force: bool = False) -> Path:
@@ -221,6 +233,7 @@ def download_bulk(config: PitEdgarConfig, force: bool = False) -> Path:
         logger.info(f"Extracting to {facts_dir} …")
         try:
             with zipfile.ZipFile(zip_path, "r") as zf:
+                _check_zip_size(zf, config.max_extracted_bytes)
                 members = zf.infolist()
                 for member_info in tqdm(members, desc="Extracting", unit="file"):
                     _safe_extract(zf, member_info, facts_dir)
