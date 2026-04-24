@@ -1045,9 +1045,6 @@ def test_parse_all_invalid_n_workers(tmp_path):
 def test_alias_precedence_follows_priority_list_order(tmp_path):
     """When two aliases collide on (end, filed, form), the alias listed earlier in
     CONCEPT_ALIAS_PRIORITY wins — independent of dict insertion order."""
-    # RevenueFromContractWithCustomerExcludingAssessedTax is index 0 in the priority
-    # list for us-gaap:Revenues; SalesRevenueNet is index 2. ExcludingAssessedTax
-    # must therefore win when both report the same (end, filed, form).
     facts = {
         "facts": {
             "us-gaap": {
@@ -1086,18 +1083,15 @@ def test_alias_precedence_follows_priority_list_order(tmp_path):
     (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
     df = parse_company(cik, ["us-gaap:Revenues"], tmp_path, ["10-K"])
     assert len(df) == 1
-    # ExcludingAssessedTax (higher priority) must win
     assert df.iloc[0]["val"] == pytest.approx(111_000_000)
     assert df.iloc[0]["accn"] == "EXCL"
 
 
 def test_reversing_priority_changes_winner(tmp_path, monkeypatch):
-    """Monkeypatching CONCEPT_ALIAS_PRIORITY to reverse the order must flip the winner —
-    regression shield to ensure the parser actually honours the priority list."""
+    """Monkeypatching CONCEPT_ALIAS_PRIORITY to reverse the order must flip the winner."""
     import pitedgar.config as config_mod
     import pitedgar.parser as parser_mod
 
-    # Reverse the Revenues priority list so SalesRevenueNet beats ExcludingAssessedTax
     reversed_priority = {
         "us-gaap:Revenues": list(
             reversed(config_mod.CONCEPT_ALIAS_PRIORITY["us-gaap:Revenues"])
@@ -1144,6 +1138,50 @@ def test_reversing_priority_changes_winner(tmp_path, monkeypatch):
     (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
     df = parse_company(cik, ["us-gaap:Revenues"], tmp_path, ["10-K"])
     assert len(df) == 1
-    # With reversed priority, SalesRevenueNet (now index 0) must win
     assert df.iloc[0]["val"] == pytest.approx(999_000_000)
     assert df.iloc[0]["accn"] == "SRN"
+
+
+# ---------------------------------------------------------------------------
+# is_scale_corrected helper tests (issue #31)
+# ---------------------------------------------------------------------------
+
+def test_is_scale_corrected_returns_boolean_series():
+    """Mixed scale_corrected column returns correct True/False mask."""
+    from pitedgar.parser import is_scale_corrected
+
+    df = pd.DataFrame({
+        "val": [1_000_000, 2_000_000, 3_000_000],
+        "scale_corrected": [True, False, True],
+    })
+    result = is_scale_corrected(df)
+
+    assert isinstance(result, pd.Series)
+    assert result.dtype == bool
+    assert list(result) == [True, False, True]
+    assert result.index.equals(df.index)
+
+
+def test_is_scale_corrected_missing_column_returns_false_series():
+    """Legacy parquet without scale_corrected column yields an all-False series."""
+    from pitedgar.parser import is_scale_corrected
+
+    df = pd.DataFrame({
+        "val": [1_000_000, 2_000_000],
+        "concept": ["us-gaap:Revenues", "us-gaap:Assets"],
+    })
+    result = is_scale_corrected(df)
+
+    assert isinstance(result, pd.Series)
+    assert result.dtype == bool
+    assert not result.any()
+    assert result.index.equals(df.index)
+
+
+def test_is_scale_corrected_exported_from_package():
+    """is_scale_corrected must be importable from both pitedgar.parser and pitedgar."""
+    from pitedgar.parser import is_scale_corrected as from_parser
+    import pitedgar
+
+    assert hasattr(pitedgar, "is_scale_corrected")
+    assert pitedgar.is_scale_corrected is from_parser
