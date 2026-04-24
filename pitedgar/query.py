@@ -592,6 +592,11 @@ class PitQuery:
         # Always surface age_days so callers can decide what to do with stale rows.
         result["age_days"] = (result["as_of_date"] - result["filed"]).dt.days.astype("Int64")
 
+        # Normalize n_periods: merge_asof leaves NaN for tickers present in the data
+        # but with no filing on or before as_of_date. Unify with the missing-ticker
+        # filler (which uses 0) so downstream filters on n_periods behave consistently.
+        result["n_periods"] = result["n_periods"].fillna(0).astype("int64")
+
         # Only nullify when the caller opts in by passing an int.
         if max_staleness_days is not None:
             stale = result["filed"].isna() | (result["age_days"] > max_staleness_days)
