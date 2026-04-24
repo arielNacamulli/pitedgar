@@ -7,6 +7,7 @@ import pandas as pd
 from loguru import logger
 
 from pitedgar.config import PitEdgarConfig
+from pitedgar.util import normalize_ticker
 
 # Exceptions we expect edgartools to raise for unresolvable tickers (delisted,
 # typos, historical symbols). Anything outside this set — network/auth/parse
@@ -54,7 +55,7 @@ def build_cik_map(tickers: list[str], config: PitEdgarConfig, force: bool = Fals
         existing_df = pd.read_parquet(out_path)
         logger.info(f"Loaded existing CIK map: {len(existing_df)} tickers cached")
 
-    tickers_upper = [t.upper() for t in tickers]
+    tickers_upper = [normalize_ticker(t) for t in tickers]
     cached_tickers = set(existing_df.index) if not existing_df.empty else set()
     new_tickers = [t for t in tickers_upper if t not in cached_tickers]
 

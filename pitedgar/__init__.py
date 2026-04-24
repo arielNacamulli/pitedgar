@@ -43,6 +43,7 @@ from pitedgar.downloader import download_bulk
 from pitedgar.mapping import build_cik_map
 from pitedgar.parser import is_scale_corrected, parse_all
 from pitedgar.query import PitQuery
+from pitedgar.util import normalize_ticker
 
 __all__ = [
     "CONCEPT_ALIASES",
@@ -53,5 +54,6 @@ __all__ = [
     "build_cik_map",
     "download_bulk",
     "is_scale_corrected",
+    "normalize_ticker",
     "parse_all",
 ]

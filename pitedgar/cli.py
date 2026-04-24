@@ -11,6 +11,7 @@ from pitedgar.downloader import download_bulk
 from pitedgar.mapping import build_cik_map
 from pitedgar.parser import parse_all
 from pitedgar.query import PitQuery
+from pitedgar.util import normalize_ticker
 
 
 def _build_config(identity: str, data_dir: str) -> PitEdgarConfig:
@@ -51,7 +52,7 @@ def cmd_map(tickers_file: str, identity: str, data_dir: str, force: bool) -> Non
         raw = Path(tickers_file).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise click.ClickException(f"Cannot read tickers file {tickers_file!r}: {exc}") from exc
-    tickers = [t.strip().upper() for t in raw.splitlines() if t.strip()]
+    tickers = [normalize_ticker(t) for t in raw.splitlines() if t.strip()]
     if not tickers:
         raise click.ClickException(f"Tickers file {tickers_file!r} is empty.")
     config = _build_config(identity, data_dir)
@@ -108,5 +109,5 @@ def cmd_query(ticker: str, concept: str, as_of: str, data_dir: str) -> None:
     except ValueError as exc:
         raise click.UsageError(f"Invalid --as-of date {as_of!r}: {exc}") from exc
     q = PitQuery(parquet_path)
-    result = q.as_of([ticker.upper()], concept, as_of_ts)
+    result = q.as_of([normalize_ticker(ticker)], concept, as_of_ts)
     click.echo(result.to_string(index=False))
