@@ -109,7 +109,11 @@ def build_cik_map(tickers: list[str], config: PitEdgarConfig, force: bool = Fals
         t0 = time.time()
         try:
             company = _fetch_company_with_retry(ticker)
-            cik_padded = f"{company.cik:010d}"
+            cik = company.cik
+            if not isinstance(cik, int) or cik < 0 or cik > 9_999_999_999:
+                logger.warning(f"Invalid CIK for ticker {ticker!r}: {cik!r} (skipping)")
+                continue
+            cik_padded = f"{cik:010d}"
             records.append(
                 {
                     "ticker": ticker,
