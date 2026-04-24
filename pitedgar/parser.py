@@ -5,6 +5,7 @@ import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from loguru import logger
 from tqdm import tqdm
@@ -19,6 +20,27 @@ _SHARE_CONCEPTS = {
     "EarningsPerShareDiluted",
     "CommonStockSharesOutstanding",
 }
+
+
+def _values_equal_tol(a: pd.Series, b: pd.Series, concept: pd.Series) -> pd.Series:
+    """True where a ≈ b under concept-appropriate tolerance; NaN in b → False.
+
+    Share/EPS concepts use a tighter absolute tolerance (1e-6) since values
+    are small. All other (USD) concepts use atol=0.005 (half a cent) to absorb
+    1-ULP float representation drift between JSON serialisations.
+    """
+    is_share = concept.str.split(":").str[-1].isin(_SHARE_CONCEPTS)
+    atol = np.where(is_share, 1e-6, 0.005)
+    # rtol=0: purely absolute tolerance. Using a non-zero rtol on USD values
+    # would scale the tolerance with magnitude (e.g. rtol=1e-9 on $1B yields
+    # $1 tolerance, swallowing genuine $1 restatements).
+    rtol = 0.0
+    a_np = a.to_numpy(dtype=float, na_value=np.nan)
+    b_np = b.to_numpy(dtype=float, na_value=np.nan)
+    # np.isclose returns False when either operand is NaN, which is the
+    # desired behaviour: NaN in b means "no previous value" → not equal.
+    result = np.isclose(a_np, b_np, atol=atol, rtol=rtol, equal_nan=False)
+    return pd.Series(result, index=a.index)
 
 
 def _preferred_units(concept_short: str) -> list[str]:
@@ -232,7 +254,7 @@ def parse_company(
     # between filings) are preserved as new rows so the query layer can track them.
     df = df.sort_values(["concept", "end", "filed"])
     prev_val = df.groupby(["concept", "end"], sort=False)["val"].shift(1)
-    keep = prev_val.isna() | (df["val"] != prev_val)
+    keep = prev_val.isna() | ~_values_equal_tol(df["val"], prev_val, df["concept"])
     df = df[keep].sort_values("filed").reset_index(drop=True)
 
     return df

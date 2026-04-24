@@ -1185,3 +1185,160 @@ def test_is_scale_corrected_exported_from_package():
 
     assert hasattr(pitedgar, "is_scale_corrected")
     assert pitedgar.is_scale_corrected is from_parser
+
+# ---------------------------------------------------------------------------
+# Float-tolerance dedup tests (issue #15)
+# ---------------------------------------------------------------------------
+
+
+def test_dedup_tolerates_float_representation_drift(tmp_path):
+    """Revenue $1B serialized as 1000000000.0 in original filing and 1.0e9 in the
+    comparative re-filing must be treated as identical → only the first row kept."""
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "Revenues": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 1000000000.0,
+                                "form": "10-K",
+                                "accn": "FD1",
+                            },
+                            # Same value, different float representation (1-ULP drift).
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2024-02-01",
+                                "val": 1000000000.0000002,
+                                "form": "10-K",
+                                "accn": "FD2",
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    cik = "0001000001"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+    df = parse_company(cik, ["us-gaap:Revenues"], tmp_path, ["10-K"])
+    assert len(df) == 1
+    assert df.iloc[0]["accn"] == "FD1"
+
+
+def test_dedup_preserves_cent_level_restatement(tmp_path):
+    """Revenue restated by $1 (one dollar on a $1B base) must NOT be dropped —
+    $0.005 < $1 so the change clears the half-cent absolute tolerance."""
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "Revenues": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 1_000_000_000.00,
+                                "form": "10-K",
+                                "accn": "CR1",
+                            },
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-04-01",
+                                "val": 1_000_000_001.00,
+                                "form": "10-K",
+                                "accn": "CR2",
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    cik = "0001000002"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+    df = parse_company(cik, ["us-gaap:Revenues"], tmp_path, ["10-K"])
+    assert len(df) == 2
+    assert set(df["accn"]) == {"CR1", "CR2"}
+
+
+def test_dedup_preserves_small_restatement_proportional(tmp_path):
+    """Revenue $1B restated to $1.01B (1 % change) must produce 2 rows."""
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "Revenues": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 1_000_000_000,
+                                "form": "10-K",
+                                "accn": "SR1",
+                            },
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-04-01",
+                                "val": 1_010_000_000,
+                                "form": "10-K",
+                                "accn": "SR2",
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    cik = "0001000003"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+    df = parse_company(cik, ["us-gaap:Revenues"], tmp_path, ["10-K"])
+    assert len(df) == 2
+    assert set(df["accn"]) == {"SR1", "SR2"}
+
+
+def test_dedup_share_concept_tolerates_float_drift(tmp_path):
+    """EPS 5.50 filed originally and 5.499999999 as a comparative re-filing must
+    be treated as identical under the tight share-concept tolerance (1e-6)."""
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "EarningsPerShareBasic": {
+                    "units": {
+                        "shares": [
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 5.5,
+                                "form": "10-K",
+                                "accn": "EP1",
+                            },
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2024-02-01",
+                                "val": 5.499999999,
+                                "form": "10-K",
+                                "accn": "EP2",
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    cik = "0001000004"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+    df = parse_company(cik, ["us-gaap:EarningsPerShareBasic"], tmp_path, ["10-K"])
+    assert len(df) == 1
+    assert df.iloc[0]["accn"] == "EP1"
+
