@@ -333,3 +333,69 @@ def test_cache_hit_without_sidecar_warns_and_proceeds(config):
         "sidecar" in str(m).lower() or "sha-256" in str(m).lower()
         for m in captured
     ), "Expected a loguru WARNING about the missing SHA-256 sidecar"
+from pathlib import Path
+from pitedgar.downloader import _safe_extract, download_bulk
+
+
+# ---------------------------------------------------------------------------
+# Zip-slip security tests
+# ---------------------------------------------------------------------------
+
+def _make_zip_with_member(path, member_name: str, content: bytes = b"{}") -> None:
+    """Write a ZIP at *path* containing a single member with the given name."""
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr(member_name, content)
+
+
+def test_extraction_rejects_parent_traversal(config, tmp_path):
+    """A member named '../evil.json' must raise RuntimeError."""
+    zip_path = config.data_dir / "companyfacts.zip"
+    _make_zip_with_member(zip_path, "../evil.json")
+    config.facts_dir.mkdir(parents=True, exist_ok=True)
+
+    with patch("pitedgar.downloader.requests.get"):
+        with pytest.raises(RuntimeError, match="Unsafe zip member path"):
+            download_bulk(config, force=False)
+
+
+def test_extraction_rejects_absolute_path(config, tmp_path):
+    """A member with an absolute path '/tmp/evil.json' must raise RuntimeError."""
+    zip_path = config.data_dir / "companyfacts.zip"
+    _make_zip_with_member(zip_path, "/tmp/evil.json")
+    config.facts_dir.mkdir(parents=True, exist_ok=True)
+
+    with patch("pitedgar.downloader.requests.get"):
+        with pytest.raises(RuntimeError, match="Unsafe zip member path"):
+            download_bulk(config, force=False)
+
+
+def test_extraction_rejects_symlink_entry(tmp_path):
+    """A ZipInfo entry with symlink external_attr must raise RuntimeError."""
+    # Build a real ZipFile so _safe_extract has a valid zf object.
+    zip_path = tmp_path / "test.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("link_target.json", "{}")
+        info = zf.infolist()[0]
+
+    # Fabricate a symlink ZipInfo: set S_IFLNK (0xA000) in the upper 16 bits.
+    symlink_info = zipfile.ZipInfo(filename="link.json")
+    symlink_info.external_attr = 0xA1ED0000  # S_IFLNK | 0755 permissions
+
+    dest = tmp_path / "dest"
+    dest.mkdir()
+
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        with pytest.raises(RuntimeError, match="Unsafe zip member path"):
+            _safe_extract(zf, symlink_info, dest)
+
+
+def test_extraction_accepts_legitimate_nested_path(config):
+    """A member like 'subdir/file.json' should extract without error."""
+    zip_path = config.data_dir / "companyfacts.zip"
+    _make_zip_with_member(zip_path, "subdir/file.json")
+    config.facts_dir.mkdir(parents=True, exist_ok=True)
+
+    with patch("pitedgar.downloader.requests.get"):
+        result = download_bulk(config, force=False)
+
+    assert (result / "subdir" / "file.json").exists()

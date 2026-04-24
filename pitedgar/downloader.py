@@ -2,15 +2,50 @@
 
 import hashlib
 import json
+import os
 import time
 import zipfile
 from pathlib import Path
+from zipfile import ZipFile, ZipInfo
 
 import requests
 from loguru import logger
 from tqdm import tqdm
 
 from pitedgar.config import PitEdgarConfig
+
+def _safe_extract(zf: ZipFile, member_info: ZipInfo, dest: Path) -> None:
+    """Extract a single ZIP member to *dest* after validating against zip-slip attacks.
+
+    Raises RuntimeError for any member whose resolved target path falls outside
+    *dest*, as well as for absolute paths, parent-traversal components, and
+    symlink entries.
+    """
+    filename = member_info.filename
+
+    # Reject absolute paths (POSIX "/" prefix or Windows drive letters like "C:").
+    if filename.startswith("/") or (len(filename) >= 2 and filename[1] == ":"):
+        raise RuntimeError(f"Unsafe zip member path: {filename!r}")
+
+    # Reject paths containing parent-traversal components.
+    parts = Path(filename).parts
+    if ".." in parts:
+        raise RuntimeError(f"Unsafe zip member path: {filename!r}")
+
+    # Reject symlink entries: external_attr upper 16 bits hold Unix mode;
+    # 0xA000 is the S_IFLNK file-type mask.
+    unix_mode = (member_info.external_attr >> 16) & 0xFFFF
+    if unix_mode & 0xF000 == 0xA000:
+        raise RuntimeError(f"Unsafe zip member path: {filename!r}")
+
+    # Resolve target and assert it stays inside dest.
+    dest_resolved = dest.resolve()
+    target = (dest / filename).resolve()
+    if not (str(target).startswith(str(dest_resolved) + os.sep) or target == dest_resolved):
+        raise RuntimeError(f"Unsafe zip member path: {filename!r}")
+
+    zf.extract(member_info, dest)
+
 
 _RETRYABLE_EXCEPTIONS: tuple[type[BaseException], ...] = (
     requests.ConnectionError,
@@ -186,9 +221,9 @@ def download_bulk(config: PitEdgarConfig, force: bool = False) -> Path:
         logger.info(f"Extracting to {facts_dir} …")
         try:
             with zipfile.ZipFile(zip_path, "r") as zf:
-                members = zf.namelist()
-                for member in tqdm(members, desc="Extracting", unit="file"):
-                    zf.extract(member, facts_dir)
+                members = zf.infolist()
+                for member_info in tqdm(members, desc="Extracting", unit="file"):
+                    _safe_extract(zf, member_info, facts_dir)
         except zipfile.BadZipFile as exc:
             # Corrupted ZIP on disk — delete it so a rerun can fetch a fresh copy.
             zip_path.unlink(missing_ok=True)
