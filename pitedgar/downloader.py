@@ -1,5 +1,7 @@
 """Step 2: bulk download companyfacts.zip from SEC EDGAR."""
 
+import hashlib
+import json
 import time
 import zipfile
 from pathlib import Path
@@ -19,18 +21,34 @@ _DEFAULT_MAX_RETRIES = 4
 _DEFAULT_BACKOFF_BASE_SECONDS = 2.0
 
 
+def _compute_sha256(path: Path, chunk_size: int = 1 << 20) -> str:
+    """Return the hex-encoded SHA-256 digest of the file at *path*."""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while True:
+            block = fh.read(chunk_size)
+            if not block:
+                break
+            h.update(block)
+    return h.hexdigest()
+
+
 def _stream_to_file(
     url: str,
     headers: dict[str, str],
     dest: Path,
     *,
     timeout: int = 120,
-) -> None:
-    """Stream an HTTP GET to *dest* via a .part sidecar, then atomically rename."""
+) -> dict[str, str]:
+    """Stream an HTTP GET to *dest* via a .part sidecar, then atomically rename.
+
+    Returns the response headers dict so callers can inspect ETag / Last-Modified.
+    """
     tmp_path = dest.with_suffix(dest.suffix + ".part")
     try:
         with requests.get(url, stream=True, headers=headers, timeout=timeout) as resp:
             resp.raise_for_status()
+            resp_headers = dict(resp.headers)
             # Content-Length of 0 means unknown; pass None so tqdm shows an indeterminate bar.
             total = int(resp.headers.get("Content-Length") or 0) or None
             with (
@@ -52,6 +70,7 @@ def _stream_to_file(
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
+    return resp_headers
 
 
 def _download_with_retries(
@@ -62,13 +81,16 @@ def _download_with_retries(
     max_retries: int = _DEFAULT_MAX_RETRIES,
     backoff_base: float = _DEFAULT_BACKOFF_BASE_SECONDS,
     timeout: int = 120,
-) -> None:
-    """Retry transient network failures with exponential backoff."""
+) -> dict[str, str]:
+    """Retry transient network failures with exponential backoff.
+
+    Returns the response headers from the successful attempt.
+    """
     attempt = 0
     while True:
         try:
-            _stream_to_file(url, headers, dest, timeout=timeout)
-            return
+            resp_headers = _stream_to_file(url, headers, dest, timeout=timeout)
+            return resp_headers
         except _RETRYABLE_EXCEPTIONS as exc:
             attempt += 1
             if attempt > max_retries:
@@ -80,6 +102,51 @@ def _download_with_retries(
             time.sleep(sleep_s)
 
 
+def _write_sidecars(zip_path: Path, resp_headers: dict[str, str]) -> None:
+    """Compute SHA-256 of *zip_path* and persist sidecar files next to it."""
+    sha256 = _compute_sha256(zip_path)
+    sha256_path = zip_path.with_suffix(zip_path.suffix + ".sha256")
+    sha256_path.write_text(sha256)
+
+    content_length_raw = resp_headers.get("Content-Length") or resp_headers.get("content-length")
+    content_length = int(content_length_raw) if content_length_raw else None
+    meta = {
+        "sha256": sha256,
+        "etag": resp_headers.get("ETag") or resp_headers.get("etag"),
+        "last_modified": resp_headers.get("Last-Modified") or resp_headers.get("last-modified"),
+        "content_length": content_length,
+    }
+    meta_path = zip_path.parent / "companyfacts.zip.meta.json"
+    meta_path.write_text(json.dumps(meta, indent=2))
+    logger.info(f"SHA-256 sidecar written: {sha256_path} ({sha256[:16]}…)")
+
+
+def _verify_sidecar(zip_path: Path) -> None:
+    """Compare the on-disk ZIP against its .sha256 sidecar (if present).
+
+    - Sidecar missing  → log a warning and proceed (legacy cache).
+    - Sidecar present, digest matches → proceed normally.
+    - Sidecar present, digest mismatch → raise RuntimeError.
+    """
+    sha256_path = zip_path.with_suffix(zip_path.suffix + ".sha256")
+    if not sha256_path.exists():
+        logger.warning(
+            f"No SHA-256 sidecar found for {zip_path}. "
+            "Skipping integrity check (legacy cache). "
+            "Re-run with force=True to regenerate the sidecar."
+        )
+        return
+    expected = sha256_path.read_text().strip()
+    actual = _compute_sha256(zip_path)
+    if actual != expected:
+        raise RuntimeError(
+            f"SHA-256 mismatch for {zip_path}: "
+            f"expected {expected!r} but got {actual!r}. "
+            "The cached ZIP may be corrupted — re-run with --force to re-download."
+        )
+    logger.debug(f"SHA-256 verified for {zip_path}: {actual[:16]}…")
+
+
 def download_bulk(config: PitEdgarConfig, force: bool = False) -> Path:
     """Download and extract the SEC companyfacts bulk ZIP.
 
@@ -87,6 +154,11 @@ def download_bulk(config: PitEdgarConfig, force: bool = False) -> Path:
     success, so a crash mid-download never leaves a corrupted ZIP behind.
     Transient network errors (ConnectionError, Timeout, ChunkedEncodingError)
     are retried with exponential backoff (2^attempt seconds, up to 4 attempts).
+
+    On a fresh download a SHA-256 sidecar (`companyfacts.zip.sha256`) and a
+    metadata file (`companyfacts.zip.meta.json`) are written next to the ZIP.
+    On subsequent runs the cached ZIP is re-hashed and compared against the
+    sidecar.  A mismatch raises `RuntimeError` so the caller knows to re-fetch.
 
     Args:
         config: pipeline configuration.
@@ -102,10 +174,12 @@ def download_bulk(config: PitEdgarConfig, force: bool = False) -> Path:
 
     if not force and zip_path.exists():
         logger.info(f"ZIP already exists at {zip_path}, skipping download (use force=True to override).")
+        _verify_sidecar(zip_path)
     else:
         logger.info(f"Downloading {config.zip_url} …")
-        _download_with_retries(config.zip_url, headers, zip_path)
+        resp_headers = _download_with_retries(config.zip_url, headers, zip_path)
         logger.info(f"ZIP saved: {zip_path}")
+        _write_sidecars(zip_path, resp_headers)
 
     facts_dir = config.facts_dir
     if force or not facts_dir.exists() or not any(facts_dir.iterdir()):

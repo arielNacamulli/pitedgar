@@ -2022,3 +2022,156 @@ def test_derive_q4_rejects_absurd_value(tmp_path):
     )
     result = _derive_q4_rows(df_q, df_k)
     assert result.empty
+
+
+# ---------------------------------------------------------------------------
+# Issue #30 — _derive_q4_rows structural validation and sanity checks
+# ---------------------------------------------------------------------------
+
+
+def test_q4_skipped_when_ends_not_monotonic_quarterly_gap(tmp_path):
+    """Q4 must be skipped when the 3 in-year quarterly ends don't form a
+    monotonic sequence with per-quarter gaps inside [Q_MIN, Q_MAX].
+
+    Fixture: Q1 (end 2025-03-31), Q1b (end 2025-04-10, same quarter but
+    slightly shifted end — bypasses dedup because the end date differs),
+    Q3 (end 2025-09-30).  Gap between Q1 and Q1b is 10 days (< Q_MIN=60)
+    → structural validation fails → no Q4 row.
+    """
+    records = [
+        # Q1 genuine
+        {
+            "ticker": "TSLA",
+            "concept": CONCEPT,
+            "end": "2025-03-31",
+            "filed": "2025-05-05",
+            "val": 100.0,
+            "form": "10-Q",
+            "accn": "Q1",
+        },
+        # Q1b — shifted end, different dedup key, but only 10 days later
+        {
+            "ticker": "TSLA",
+            "concept": CONCEPT,
+            "end": "2025-04-10",
+            "filed": "2025-05-10",
+            "val": 105.0,
+            "form": "10-Q",
+            "accn": "Q1b",
+        },
+        # Q3 — skips Q2 entirely; gap from Q1b to Q3 is ~173 days (> Q_MAX=105)
+        {
+            "ticker": "TSLA",
+            "concept": CONCEPT,
+            "end": "2025-09-30",
+            "filed": "2025-11-10",
+            "val": 300.0,
+            "form": "10-Q",
+            "accn": "Q3",
+        },
+        # FY2025 10-K
+        {
+            "ticker": "TSLA",
+            "concept": CONCEPT,
+            "end": "2025-12-31",
+            "filed": "2026-02-05",
+            "val": 1000.0,
+            "form": "10-K",
+            "accn": "K1",
+        },
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    q = PitQuery(path)
+
+    # Gap check fails → no synthetic Q4 → only 3 real quarters (< min_periods=4)
+    result = q.ttm("TSLA", CONCEPT, min_periods=4)
+    assert result.empty
+
+
+def test_q4_skipped_when_absurd_value(tmp_path):
+    """Q4 must be skipped (with a warning) when |q4_val| > 2 * |annual_val|.
+
+    annual=1000, Q1+Q2+Q3=5000 → q4_val = -4000.
+    abs(-4000) = 4000 > 2 * 1000 = 2000 → skip + warning.
+    """
+    from loguru import logger as loguru_logger
+
+    records = [
+        {
+            "ticker": "TSLA",
+            "concept": CONCEPT,
+            "end": "2025-03-31",
+            "filed": "2025-05-05",
+            "val": 2000.0,
+            "form": "10-Q",
+            "accn": "Q1",
+        },
+        {
+            "ticker": "TSLA",
+            "concept": CONCEPT,
+            "end": "2025-06-30",
+            "filed": "2025-08-05",
+            "val": 2000.0,
+            "form": "10-Q",
+            "accn": "Q2",
+        },
+        {
+            "ticker": "TSLA",
+            "concept": CONCEPT,
+            "end": "2025-09-30",
+            "filed": "2025-11-10",
+            "val": 1000.0,
+            "form": "10-Q",
+            "accn": "Q3",
+        },
+        # Annual = 1000, but Q1+Q2+Q3 = 5000 → q4_val = -4000 (absurd)
+        {
+            "ticker": "TSLA",
+            "concept": CONCEPT,
+            "end": "2025-12-31",
+            "filed": "2026-02-05",
+            "val": 1000.0,
+            "form": "10-K",
+            "accn": "K1",
+        },
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+
+    warnings_captured: list[str] = []
+
+    def _sink(message) -> None:
+        if message.record["level"].name == "WARNING":
+            warnings_captured.append(str(message))
+
+    sink_id = loguru_logger.add(_sink, level="WARNING")
+    try:
+        q = PitQuery(path)
+        result = q.ttm("TSLA", CONCEPT, min_periods=4)
+    finally:
+        loguru_logger.remove(sink_id)
+
+    # No synthetic Q4 injected → 3 quarters < min_periods=4 → no TTM row
+    assert result.empty
+    # Warning must have been emitted
+    assert any("absurd" in w.lower() or "q4" in w.lower() for w in warnings_captured), (
+        f"Expected a warning about absurd Q4 value; captured: {warnings_captured}"
+    )
+
+
+def test_q4_happy_path_still_works(dec_fy_parquet_path):
+    """Regression: the standard Q4-from-10K derivation must still work after
+    the structural validation and sanity checks are added.
+
+    This is a reference to the existing test_ttm_derives_q4_from_10k fixture.
+    Annual=1000, Q1=100, Q2=200, Q3=300 → Q4=400, TTM=1000.
+    """
+    q = PitQuery(dec_fy_parquet_path)
+    result = q.ttm("TSLA", CONCEPT)
+    last = result.iloc[-1]
+    assert last["ttm_val"] == pytest.approx(1000.0)
+    assert last["n_periods"] == 4
+    assert last["filed"] == pd.Timestamp("2026-02-05")

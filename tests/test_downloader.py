@@ -1,6 +1,7 @@
 """Tests for downloader.py — cache-skip, retry, atomicity, corrupt-ZIP behavior."""
 
 import io
+import json
 import zipfile
 from unittest.mock import MagicMock, patch
 
@@ -197,3 +198,138 @@ def test_non_retryable_error_propagates_immediately(config):
         download_bulk(config, force=False)
 
     assert mock_get.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# SHA-256 sidecar / integrity tests
+# ---------------------------------------------------------------------------
+
+def _make_streaming_response_with_meta(payload: bytes) -> MagicMock:
+    """Build a mock streaming response that includes ETag / Last-Modified headers."""
+    resp = MagicMock()
+    resp.__enter__ = lambda s: s
+    resp.__exit__ = MagicMock(return_value=False)
+    resp.headers = {
+        "Content-Length": str(len(payload)),
+        "ETag": '"abc123"',
+        "Last-Modified": "Wed, 01 Jan 2025 00:00:00 GMT",
+    }
+    resp.raise_for_status = MagicMock()
+    resp.iter_content = MagicMock(return_value=[payload])
+    return resp
+
+
+def test_download_writes_sha256_sidecar(config):
+    """After a fresh download both .sha256 and .meta.json sidecars must exist and be non-empty."""
+    config.facts_dir.mkdir(parents=True, exist_ok=True)
+
+    buf = io.BytesIO()
+    _make_zip(buf)
+    zip_bytes = buf.getvalue()
+
+    mock_resp = _make_streaming_response_with_meta(zip_bytes)
+
+    with patch("pitedgar.downloader.requests.get", return_value=mock_resp):
+        download_bulk(config, force=False)
+
+    sha256_path = config.data_dir / "companyfacts.zip.sha256"
+    meta_path = config.data_dir / "companyfacts.zip.meta.json"
+
+    assert sha256_path.exists(), ".sha256 sidecar was not written"
+    assert meta_path.exists(), ".meta.json sidecar was not written"
+
+    digest = sha256_path.read_text().strip()
+    assert len(digest) == 64, "SHA-256 digest should be 64 hex chars"
+
+    meta = json.loads(meta_path.read_text())
+    assert meta["sha256"] == digest
+    assert meta["etag"] == '"abc123"'
+    assert meta["last_modified"] == "Wed, 01 Jan 2025 00:00:00 GMT"
+    assert meta["content_length"] == len(zip_bytes)
+
+
+def test_cache_hit_verifies_sha256(config):
+    """Second run (no force) must pass SHA-256 check without re-downloading."""
+    config.facts_dir.mkdir(parents=True, exist_ok=True)
+
+    buf = io.BytesIO()
+    _make_zip(buf)
+    zip_bytes = buf.getvalue()
+
+    mock_resp = _make_streaming_response_with_meta(zip_bytes)
+
+    # First run — fresh download, writes sidecar.
+    with patch("pitedgar.downloader.requests.get", return_value=mock_resp) as mock_get:
+        download_bulk(config, force=False)
+        assert mock_get.call_count == 1
+
+    # Second run — cache hit; sidecar present; no re-download.
+    with patch("pitedgar.downloader.requests.get") as mock_get2:
+        download_bulk(config, force=False)
+        mock_get2.assert_not_called()
+
+
+def test_cache_hit_rejects_corrupted_zip(config):
+    """After fresh download, flipping a byte in the ZIP must cause RuntimeError on next run."""
+    config.facts_dir.mkdir(parents=True, exist_ok=True)
+
+    buf = io.BytesIO()
+    _make_zip(buf)
+    zip_bytes = buf.getvalue()
+
+    mock_resp = _make_streaming_response_with_meta(zip_bytes)
+
+    # First run — writes the ZIP and its sidecar.
+    with patch("pitedgar.downloader.requests.get", return_value=mock_resp):
+        download_bulk(config, force=False)
+
+    # Corrupt the ZIP on disk (flip one byte).
+    zip_path = config.data_dir / "companyfacts.zip"
+    data = bytearray(zip_path.read_bytes())
+    data[0] ^= 0xFF
+    zip_path.write_bytes(bytes(data))
+
+    # Second run must raise RuntimeError mentioning SHA-256 mismatch.
+    with pytest.raises(RuntimeError, match="(?i)sha.?256"):
+        download_bulk(config, force=False)
+
+
+def test_cache_hit_without_sidecar_warns_and_proceeds(config):
+    """If the .sha256 sidecar is absent (legacy cache), a warning is logged and the run continues."""
+    from loguru import logger as loguru_logger
+
+    config.facts_dir.mkdir(parents=True, exist_ok=True)
+
+    buf = io.BytesIO()
+    _make_zip(buf)
+    zip_bytes = buf.getvalue()
+
+    mock_resp = _make_streaming_response_with_meta(zip_bytes)
+
+    # First run — download + sidecar.
+    with patch("pitedgar.downloader.requests.get", return_value=mock_resp):
+        download_bulk(config, force=False)
+
+    # Remove sidecar to simulate legacy cache.
+    sha256_path = config.data_dir / "companyfacts.zip.sha256"
+    sha256_path.unlink()
+
+    # Capture loguru WARNING messages during the second run.
+    captured: list[str] = []
+
+    def _sink(message) -> None:
+        if message.record["level"].name == "WARNING":
+            captured.append(message)
+
+    sink_id = loguru_logger.add(_sink, level="WARNING")
+    try:
+        with patch("pitedgar.downloader.requests.get") as mock_get2:
+            download_bulk(config, force=False)
+            mock_get2.assert_not_called()
+    finally:
+        loguru_logger.remove(sink_id)
+
+    assert any(
+        "sidecar" in str(m).lower() or "sha-256" in str(m).lower()
+        for m in captured
+    ), "Expected a loguru WARNING about the missing SHA-256 sidecar"
