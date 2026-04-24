@@ -17,3 +17,10 @@ if "edgar" not in sys.modules:
     _edgar_stub.set_identity = MagicMock()
     _edgar_stub.Company = MagicMock()
     sys.modules["edgar"] = _edgar_stub
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "adversarial: regression tests for adversarial-review findings (see #38).",
+    )
