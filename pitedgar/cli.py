@@ -100,7 +100,15 @@ def cmd_build(identity: str, data_dir: str, force: bool, workers: int | None) ->
 @click.option("--concept", required=True, help='e.g. "us-gaap:Revenues"')
 @click.option("--as-of", "as_of", required=True, help="ISO date, e.g. 2023-06-30")
 @click.option("--data-dir", default="./data", show_default=True)
-def cmd_query(ticker: str, concept: str, as_of: str, data_dir: str) -> None:
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["table", "json", "csv"], case_sensitive=False),
+    default="table",
+    show_default=True,
+    help="Output format.",
+)
+def cmd_query(ticker: str, concept: str, as_of: str, data_dir: str, fmt: str) -> None:
     """Query the latest PIT value for a ticker/concept as of a date."""
     parquet_path = Path(data_dir) / "pit_financials.parquet"
     _require_file(parquet_path, hint="Run `pitedgar build` first to create it.")
@@ -110,4 +118,9 @@ def cmd_query(ticker: str, concept: str, as_of: str, data_dir: str) -> None:
         raise click.UsageError(f"Invalid --as-of date {as_of!r}: {exc}") from exc
     q = PitQuery(parquet_path)
     result = q.as_of([normalize_ticker(ticker)], concept, as_of_ts)
-    click.echo(result.to_string(index=False))
+    if fmt == "json":
+        click.echo(result.to_json(orient="records", date_format="iso", indent=2))
+    elif fmt == "csv":
+        click.echo(result.to_csv(index=False))
+    else:
+        click.echo(result.to_string(index=False))
