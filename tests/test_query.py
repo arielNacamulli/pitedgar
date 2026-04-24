@@ -1229,3 +1229,95 @@ def test_ttm_cross_section_matches_ttm_on_ytd_universe(tmp_path):
             assert pd.isna(row["ttm_val"])
         else:
             assert row["ttm_val"] == pytest.approx(expected, rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# PitQuery.__init__ filter pushdown kwargs (#24)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def multi_ticker_parquet(tmp_path):
+    """Parquet with AAPL, MSFT, and two concepts for filter tests."""
+    records = [
+        {
+            "ticker": "AAPL",
+            "concept": "us-gaap:Revenues",
+            "end": "2022-12-31",
+            "filed": "2023-02-02",
+            "val": 394328000000.0,
+            "form": "10-K",
+            "accn": "A1",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": "us-gaap:Assets",
+            "end": "2022-12-31",
+            "filed": "2023-02-02",
+            "val": 352755000000.0,
+            "form": "10-K",
+            "accn": "A2",
+        },
+        {
+            "ticker": "MSFT",
+            "concept": "us-gaap:Revenues",
+            "end": "2022-06-30",
+            "filed": "2022-07-28",
+            "val": 198270000000.0,
+            "form": "10-K",
+            "accn": "B1",
+        },
+        {
+            "ticker": "MSFT",
+            "concept": "us-gaap:Assets",
+            "end": "2022-06-30",
+            "filed": "2022-07-28",
+            "val": 364840000000.0,
+            "form": "10-K",
+            "accn": "B2",
+        },
+        # Old row that should be excluded by a `since` filter
+        {
+            "ticker": "AAPL",
+            "concept": "us-gaap:Revenues",
+            "end": "2021-12-31",
+            "filed": "2022-01-28",
+            "val": 365817000000.0,
+            "form": "10-K",
+            "accn": "A0",
+        },
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    return path
+
+
+def test_init_with_ticker_filter_loads_subset(multi_ticker_parquet):
+    """PitQuery(path, tickers=['AAPL']) loads only AAPL rows."""
+    q = PitQuery(multi_ticker_parquet, tickers=["AAPL"])
+    assert set(q.data["ticker"].unique()) == {"AAPL"}
+    assert "MSFT" not in q.data["ticker"].values
+
+
+def test_init_with_concept_filter(multi_ticker_parquet):
+    """PitQuery(path, concepts=['us-gaap:Revenues']) loads only Revenues rows."""
+    q = PitQuery(multi_ticker_parquet, concepts=["us-gaap:Revenues"])
+    assert set(q.data["concept"].unique()) == {"us-gaap:Revenues"}
+    assert "us-gaap:Assets" not in q.data["concept"].values
+
+
+def test_init_with_since_filter_drops_old_rows(multi_ticker_parquet):
+    """PitQuery(path, since='2023-01-01') drops rows filed before 2023-01-01."""
+    q = PitQuery(multi_ticker_parquet, since="2023-01-01")
+    assert (q.data["filed"] >= pd.Timestamp("2023-01-01")).all()
+    # The AAPL row filed 2022-01-28 must be absent
+    assert len(q.data[q.data["filed"] < pd.Timestamp("2023-01-01")]) == 0
+
+
+def test_init_without_filters_is_backwards_compatible(multi_ticker_parquet):
+    """PitQuery(path) with no filter kwargs loads all rows unchanged."""
+    q = PitQuery(multi_ticker_parquet)
+    assert set(q.data["ticker"].unique()) == {"AAPL", "MSFT"}
+    assert set(q.data["concept"].unique()) == {"us-gaap:Revenues", "us-gaap:Assets"}
+    assert len(q.data) == 5
