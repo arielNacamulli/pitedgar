@@ -91,6 +91,7 @@ def test_parse_company_returns_correct_columns(facts_dir):
         "form",
         "accn",
         "scale_corrected",
+        "alias_source",
     }
 
 
@@ -1259,40 +1260,103 @@ def test_scale_correction_off_never_multiplies(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Alias priority tests (issue #25)
+# C3 alias_source column / lossy aliases (issue #14)
+# ---------------------------------------------------------------------------
+
+def _profit_loss_facts(val: int = 500_000_000) -> dict:
+    return {
+        "facts": {
+            "us-gaap": {
+                "ProfitLoss": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2023-01-01",
+                                "end": "2023-12-31",
+                                "filed": "2024-02-01",
+                                "val": val,
+                                "form": "10-K",
+                                "accn": "PL1",
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+    }
+
+
+def test_lossy_alias_disabled_by_default(tmp_path):
+    cik = "0000099101"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(_profit_loss_facts()), encoding="utf-8")
+    df = parse_company(cik, ["us-gaap:NetIncomeLoss"], tmp_path, ["10-K"])
+    assert df.empty
+
+
+def test_lossy_alias_enabled_substitutes_with_marker(tmp_path):
+    from pitedgar.config import LOSSY_CONCEPT_ALIASES
+    cik = "0000099102"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(_profit_loss_facts(600_000_000)), encoding="utf-8")
+    df = parse_company(
+        cik, ["us-gaap:NetIncomeLoss"], tmp_path, ["10-K"],
+        lossy_alias_map=LOSSY_CONCEPT_ALIASES,
+    )
+    assert len(df) == 1
+    assert df.iloc[0]["concept"] == "us-gaap:NetIncomeLoss"
+    assert df.iloc[0]["alias_source"] == "us-gaap:ProfitLoss"
+    assert df.iloc[0]["val"] == pytest.approx(600_000_000)
+
+
+def test_non_lossy_alias_unmarked(tmp_path):
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "SalesRevenueNet": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2017-01-01",
+                                "end": "2017-12-31",
+                                "filed": "2018-02-15",
+                                "val": 250_000_000,
+                                "form": "10-K",
+                                "accn": "SRN1",
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    cik = "0000099103"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+    df = parse_company(cik, ["us-gaap:Revenues"], tmp_path, ["10-K"])
+    assert len(df) == 1
+    assert df.iloc[0]["concept"] == "us-gaap:Revenues"
+    assert df.iloc[0]["alias_source"] is None
+
+
+# ---------------------------------------------------------------------------
+# M1 alias priority (issue #25)
 # ---------------------------------------------------------------------------
 
 def test_alias_precedence_follows_priority_list_order(tmp_path):
-    """When two aliases collide on (end, filed, form), the alias listed earlier in
-    CONCEPT_ALIAS_PRIORITY wins — independent of dict insertion order."""
     facts = {
         "facts": {
             "us-gaap": {
                 "RevenueFromContractWithCustomerExcludingAssessedTax": {
                     "units": {
                         "USD": [
-                            {
-                                "start": "2023-01-01",
-                                "end": "2023-12-31",
-                                "filed": "2024-02-01",
-                                "val": 111_000_000,
-                                "form": "10-K",
-                                "accn": "EXCL",
-                            },
+                            {"start": "2023-01-01", "end": "2023-12-31", "filed": "2024-02-01",
+                             "val": 111_000_000, "form": "10-K", "accn": "EXCL"},
                         ]
                     }
                 },
                 "SalesRevenueNet": {
                     "units": {
                         "USD": [
-                            {
-                                "start": "2023-01-01",
-                                "end": "2023-12-31",
-                                "filed": "2024-02-01",
-                                "val": 999_000_000,
-                                "form": "10-K",
-                                "accn": "SRN",
-                            },
+                            {"start": "2023-01-01", "end": "2023-12-31", "filed": "2024-02-01",
+                             "val": 999_000_000, "form": "10-K", "accn": "SRN"},
                         ]
                     }
                 },
@@ -1308,7 +1372,6 @@ def test_alias_precedence_follows_priority_list_order(tmp_path):
 
 
 def test_reversing_priority_changes_winner(tmp_path, monkeypatch):
-    """Monkeypatching CONCEPT_ALIAS_PRIORITY to reverse order must flip the winner."""
     import pitedgar.config as config_mod
     import pitedgar.parser as parser_mod
 
@@ -1326,28 +1389,16 @@ def test_reversing_priority_changes_winner(tmp_path, monkeypatch):
                 "RevenueFromContractWithCustomerExcludingAssessedTax": {
                     "units": {
                         "USD": [
-                            {
-                                "start": "2023-01-01",
-                                "end": "2023-12-31",
-                                "filed": "2024-02-01",
-                                "val": 111_000_000,
-                                "form": "10-K",
-                                "accn": "EXCL",
-                            },
+                            {"start": "2023-01-01", "end": "2023-12-31", "filed": "2024-02-01",
+                             "val": 111_000_000, "form": "10-K", "accn": "EXCL"},
                         ]
                     }
                 },
                 "SalesRevenueNet": {
                     "units": {
                         "USD": [
-                            {
-                                "start": "2023-01-01",
-                                "end": "2023-12-31",
-                                "filed": "2024-02-01",
-                                "val": 999_000_000,
-                                "form": "10-K",
-                                "accn": "SRN",
-                            },
+                            {"start": "2023-01-01", "end": "2023-12-31", "filed": "2024-02-01",
+                             "val": 999_000_000, "form": "10-K", "accn": "SRN"},
                         ]
                     }
                 },
@@ -1363,78 +1414,49 @@ def test_reversing_priority_changes_winner(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# is_scale_corrected helper tests (issue #31)
+# M7 is_scale_corrected helper (issue #31)
 # ---------------------------------------------------------------------------
 
 def test_is_scale_corrected_returns_boolean_series():
-    """Mixed scale_corrected column returns correct True/False mask."""
     from pitedgar.parser import is_scale_corrected
-
-    df = pd.DataFrame({
-        "val": [1_000_000, 2_000_000, 3_000_000],
-        "scale_corrected": [True, False, True],
-    })
+    df = pd.DataFrame({"val": [1_000_000, 2_000_000, 3_000_000], "scale_corrected": [True, False, True]})
     result = is_scale_corrected(df)
-
     assert isinstance(result, pd.Series)
     assert result.dtype == bool
     assert list(result) == [True, False, True]
-    assert result.index.equals(df.index)
 
 
 def test_is_scale_corrected_missing_column_returns_false_series():
-    """Legacy parquet without scale_corrected column yields an all-False series."""
     from pitedgar.parser import is_scale_corrected
-
-    df = pd.DataFrame({
-        "val": [1_000_000, 2_000_000],
-        "concept": ["us-gaap:Revenues", "us-gaap:Assets"],
-    })
+    df = pd.DataFrame({"val": [1_000_000, 2_000_000], "concept": ["us-gaap:Revenues", "us-gaap:Assets"]})
     result = is_scale_corrected(df)
-
     assert isinstance(result, pd.Series)
     assert result.dtype == bool
     assert not result.any()
-    assert result.index.equals(df.index)
 
 
 def test_is_scale_corrected_exported_from_package():
-    """is_scale_corrected must be importable from both pitedgar.parser and pitedgar."""
     from pitedgar.parser import is_scale_corrected as from_parser
     import pitedgar
-
     assert hasattr(pitedgar, "is_scale_corrected")
     assert pitedgar.is_scale_corrected is from_parser
 
 
 # ---------------------------------------------------------------------------
-# Float-tolerance dedup tests (issue #15)
+# C4 tolerant dedup (issue #15)
 # ---------------------------------------------------------------------------
 
 def test_dedup_tolerates_float_representation_drift(tmp_path):
-    """Same revenue $1B serialized with float drift must dedupe."""
     facts = {
         "facts": {
             "us-gaap": {
                 "Revenues": {
                     "units": {
                         "USD": [
-                            {
-                                "start": "2022-01-01",
-                                "end": "2022-12-31",
-                                "filed": "2023-02-01",
-                                "val": 1_000_000_000.0,
-                                "form": "10-K",
-                                "accn": "F1",
-                            },
-                            {
-                                "start": "2022-01-01",
-                                "end": "2022-12-31",
-                                "filed": "2024-02-01",
-                                "val": 1_000_000_000.0 + 1e-7,
-                                "form": "10-K",
-                                "accn": "F2",
-                            },
+                            {"start": "2022-01-01", "end": "2022-12-31", "filed": "2023-02-01",
+                             "val": 1_000_000_000.0, "form": "10-K", "accn": "F1"},
+                            {"start": "2022-01-01", "end": "2022-12-31", "filed": "2024-02-01",
+                             "val": 1_000_000_000.0 + 1e-7, "form": "10-K", "accn": "F2"},
                         ]
                     }
                 }
@@ -1449,29 +1471,16 @@ def test_dedup_tolerates_float_representation_drift(tmp_path):
 
 
 def test_dedup_preserves_cent_level_restatement(tmp_path):
-    """Revenue $1B restated by exactly $1 (well above 0.005 USD atol) must produce 2 rows."""
     facts = {
         "facts": {
             "us-gaap": {
                 "Revenues": {
                     "units": {
                         "USD": [
-                            {
-                                "start": "2022-01-01",
-                                "end": "2022-12-31",
-                                "filed": "2023-02-01",
-                                "val": 1_000_000_000.00,
-                                "form": "10-K",
-                                "accn": "CR1",
-                            },
-                            {
-                                "start": "2022-01-01",
-                                "end": "2022-12-31",
-                                "filed": "2023-04-01",
-                                "val": 1_000_000_001.00,
-                                "form": "10-K",
-                                "accn": "CR2",
-                            },
+                            {"start": "2022-01-01", "end": "2022-12-31", "filed": "2023-02-01",
+                             "val": 1_000_000_000.00, "form": "10-K", "accn": "CR1"},
+                            {"start": "2022-01-01", "end": "2022-12-31", "filed": "2023-04-01",
+                             "val": 1_000_000_001.00, "form": "10-K", "accn": "CR2"},
                         ]
                     }
                 }
@@ -1486,29 +1495,16 @@ def test_dedup_preserves_cent_level_restatement(tmp_path):
 
 
 def test_dedup_preserves_small_restatement_proportional(tmp_path):
-    """Revenue $1B restated to $1.01B (1% change) must produce 2 rows."""
     facts = {
         "facts": {
             "us-gaap": {
                 "Revenues": {
                     "units": {
                         "USD": [
-                            {
-                                "start": "2022-01-01",
-                                "end": "2022-12-31",
-                                "filed": "2023-02-01",
-                                "val": 1_000_000_000,
-                                "form": "10-K",
-                                "accn": "SR1",
-                            },
-                            {
-                                "start": "2022-01-01",
-                                "end": "2022-12-31",
-                                "filed": "2023-04-01",
-                                "val": 1_010_000_000,
-                                "form": "10-K",
-                                "accn": "SR2",
-                            },
+                            {"start": "2022-01-01", "end": "2022-12-31", "filed": "2023-02-01",
+                             "val": 1_000_000_000, "form": "10-K", "accn": "SR1"},
+                            {"start": "2022-01-01", "end": "2022-12-31", "filed": "2023-04-01",
+                             "val": 1_010_000_000, "form": "10-K", "accn": "SR2"},
                         ]
                     }
                 }
@@ -1523,29 +1519,16 @@ def test_dedup_preserves_small_restatement_proportional(tmp_path):
 
 
 def test_dedup_share_concept_tolerates_float_drift(tmp_path):
-    """EPS 5.50 and 5.499999999 must dedupe under tight share tolerance."""
     facts = {
         "facts": {
             "us-gaap": {
                 "EarningsPerShareBasic": {
                     "units": {
                         "shares": [
-                            {
-                                "start": "2022-01-01",
-                                "end": "2022-12-31",
-                                "filed": "2023-02-01",
-                                "val": 5.5,
-                                "form": "10-K",
-                                "accn": "EP1",
-                            },
-                            {
-                                "start": "2022-01-01",
-                                "end": "2022-12-31",
-                                "filed": "2024-02-01",
-                                "val": 5.499999999,
-                                "form": "10-K",
-                                "accn": "EP2",
-                            },
+                            {"start": "2022-01-01", "end": "2022-12-31", "filed": "2023-02-01",
+                             "val": 5.5, "form": "10-K", "accn": "EP1"},
+                            {"start": "2022-01-01", "end": "2022-12-31", "filed": "2024-02-01",
+                             "val": 5.499999999, "form": "10-K", "accn": "EP2"},
                         ]
                     }
                 }

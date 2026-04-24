@@ -10,7 +10,12 @@ import pandas as pd
 from loguru import logger
 from tqdm import tqdm
 
-from pitedgar.config import CONCEPT_ALIAS_PRIORITY, CONCEPT_ALIASES, PitEdgarConfig
+from pitedgar.config import (
+    CONCEPT_ALIAS_PRIORITY,
+    CONCEPT_ALIASES,
+    LOSSY_CONCEPT_ALIASES,
+    PitEdgarConfig,
+)
 from pitedgar.periods import is_quarterly
 
 # Units to attempt per concept, in priority order.
@@ -55,13 +60,6 @@ def is_scale_corrected(df: pd.DataFrame) -> pd.Series:
     Use this to filter or exclude corrected rows when merging parquets from
     different parse runs, since the correction is applied in-place and not
     re-detectable from values alone.
-
-    Args:
-        df: DataFrame produced by :func:`parse_company` or :func:`parse_all`.
-
-    Returns:
-        Boolean :class:`pandas.Series` aligned to ``df.index``.  All-False when
-        ``df`` is a legacy parquet that pre-dates the ``scale_corrected`` column.
     """
     if "scale_corrected" not in df.columns:
         return pd.Series(False, index=df.index)
@@ -75,37 +73,37 @@ def parse_company(
     forms: list[str],
     scale_correction: str = "off",
     scale_correction_threshold: float = 1_000_000.0,
+    alias_map: dict[str, str] | None = None,
+    lossy_alias_map: dict[str, str] | None = None,
 ) -> pd.DataFrame:
     """Parse a single company's JSON into a tidy PIT DataFrame.
 
     Args:
-        cik_padded: zero-padded 10-digit CIK string.
-        concepts:   list of "us-gaap:ConceptName" strings to extract. Pass ``None``
-                    or an empty list to extract every us-gaap concept present in
-                    the JSON (recommended — the full parquet supports flexible
-                    quant signal iteration without re-parsing the 1.5 GB cache).
-        facts_dir:  directory containing CIK*.json files.
-        forms:      filing forms to keep, e.g. ["10-K", "10-Q"].
-        scale_correction: one of "off", "auto", or "force".
-            "off"  — never apply 1000x correction (default).
-            "auto" — apply correction only when ≥2 distinct USD concepts are ALL
-                     below ``scale_correction_threshold``; emits a warning.
-            "force"— always multiply USD values ×1000, no threshold check.
-        scale_correction_threshold: max absolute USD value below which the
-            ``auto`` heuristic considers a concept under-scaled (default $1M).
+        cik_padded:      zero-padded 10-digit CIK string.
+        concepts:        list of "us-gaap:ConceptName" strings, or None for all.
+        facts_dir:       directory containing CIK*.json files.
+        forms:           filing forms to keep, e.g. ["10-K", "10-Q"].
+        scale_correction: "off" | "auto" | "force" — controls 1000x USD correction.
+        scale_correction_threshold: threshold USD value for the "auto" heuristic.
+        alias_map:       non-lossy alias dict (defaults to ``CONCEPT_ALIASES``).
+        lossy_alias_map: lossy alias dict (defaults to ``{}``). Rows produced via a
+                         lossy alias carry the original tag in ``alias_source``.
 
     Returns:
-        DataFrame with columns: cik, concept, end, filed, val, form, accn.
-        The ``concept`` column always contains the canonical full name
-        ``"us-gaap:<Name>"`` — alias tags are mapped to their canonical target.
+        DataFrame with columns: ticker, cik, concept, start, end, duration_days,
+        filed, val, form, accn, scale_corrected, alias_source.
 
     Note:
-        The ``scale_corrected`` column is an audit marker.  Do NOT re-run scale
-        detection on an already-parsed parquet — use
-        :func:`pitedgar.parser.is_scale_corrected` to identify affected rows
-        before merging with another parse.  Merging two already-scaled parquets
-        and re-applying scale detection would double-multiply small-value CIKs.
+        The ``scale_corrected`` column is an audit marker. Do NOT re-run scale
+        detection on an already-parsed parquet — use ``is_scale_corrected`` to
+        identify affected rows before merging with another parse.
     """
+    effective_alias_map: dict[str, str] = CONCEPT_ALIASES if alias_map is None else alias_map
+    effective_lossy_map: dict[str, str] = lossy_alias_map if lossy_alias_map is not None else {}
+    combined_alias_map: dict[str, str] = {**effective_alias_map, **effective_lossy_map}
+    lossy_tags: set[str] = set(effective_lossy_map)
+    warned_lossy: set[str] = set()
+
     json_path = facts_dir / f"CIK{cik_padded}.json"
     if not json_path.exists():
         logger.debug(f"No JSON for CIK {cik_padded}, skipping.")
@@ -118,37 +116,29 @@ def parse_company(
     if not usgaap:
         return pd.DataFrame()
 
-    # When ``concepts`` is None or empty, derive the canonical concept set from
-    # whatever us-gaap tags this company actually filed. Aliases are mapped to
-    # their canonical name so e.g. a filer that only reports the post-ASC 606
-    # revenue tag still ends up under ``us-gaap:Revenues`` in the parquet.
     if not concepts:
         canonical_set: set[str] = set()
         for short_name in usgaap:
             full_name = f"us-gaap:{short_name}"
-            canonical = CONCEPT_ALIASES.get(full_name, full_name)
+            canonical = combined_alias_map.get(full_name, full_name)
             canonical_set.add(canonical)
         concepts = sorted(canonical_set)
 
     rows: list[dict] = []
 
     # Build reverse alias map: canonical -> [alias, ...] in explicit priority order.
-    # CONCEPT_ALIAS_PRIORITY is the source of truth for ordering; aliases earlier in
-    # the list take precedence when two aliases collide on (end, filed, form).
+    # CONCEPT_ALIAS_PRIORITY is the source of truth for non-lossy ordering;
+    # lossy aliases (when enabled) are appended after the priority-ordered aliases.
     alias_lookup: dict[str, list[str]] = {
         c: list(CONCEPT_ALIAS_PRIORITY.get(c, [])) for c in concepts
     }
+    # Append lossy alias candidates to the lookup for canonicals that have them,
+    # so the candidate loop picks them up when lossy_alias_map is non-empty.
+    for lossy_alias, canonical in effective_lossy_map.items():
+        if canonical in alias_lookup and lossy_alias not in alias_lookup[canonical]:
+            alias_lookup[canonical].append(lossy_alias)
 
     for concept_full in concepts:
-        # Union data from the canonical concept AND every alias — a filer may
-        # report different periods under different tags (e.g. pre-ASC 606 years
-        # under ``SalesRevenueNet`` and post-ASC 606 years under
-        # ``RevenueFromContractWithCustomerExcludingAssessedTax``), so stopping at
-        # the first tag with data would silently drop all the other periods.
-        #
-        # Canonical precedence: when the same ``(end, filed, form, accn)`` key is
-        # present under multiple tags, the canonical value wins. The candidate
-        # list places canonical first and we dedup ``keep='first'`` below.
         candidates = [concept_full, *alias_lookup.get(concept_full, [])]
         canonical_short = concept_full.split(":", 1)[-1]
 
@@ -159,9 +149,6 @@ def parse_company(
             if concept_data is None:
                 continue
             units_dict: dict = concept_data.get("units", {})
-            # Pick the preferred unit per candidate (USD vs shares). This runs
-            # independently for each candidate so e.g. a share-concept alias
-            # reported in "shares" is still picked up alongside the canonical.
             unit_entries: list[dict] | None = None
             for unit_key in _preferred_units(canonical_short):
                 if unit_key in units_dict:
@@ -169,6 +156,16 @@ def parse_company(
                     break
             if not unit_entries:
                 continue
+
+            is_lossy = candidate_full in lossy_tags
+            alias_source_value: str | None = candidate_full if is_lossy else None
+
+            if is_lossy and candidate_full not in warned_lossy:
+                logger.warning(
+                    f"CIK {cik_padded}: lossy alias {candidate_full!r} → "
+                    f"{concept_full!r}; rows will have alias_source set."
+                )
+                warned_lossy.add(candidate_full)
 
             for entry in unit_entries:
                 form = entry.get("form", "")
@@ -191,25 +188,13 @@ def parse_company(
                         "val": float(val),
                         "form": form,
                         "accn": accn,
+                        "alias_source": alias_source_value,
                     }
                 )
 
         if not candidate_rows:
-            # Concept reported neither USD nor shares (e.g. pure/EUR/etc.) — skip
-            # silently to keep the parquet schema homogeneous.
             continue
 
-        # Dedup across candidates by (end, filed, form). Because the canonical
-        # candidate is processed first, the first-seen row wins — preserving
-        # canonical precedence when a filer reports the same reporting instance
-        # (same period, same filing date, same form) under both canonical and
-        # alias tags. Different ``accn`` values at the same (end, filed, form)
-        # cannot legitimately coexist for one company, so excluding accn from
-        # the dedup key is safe and also matches the legacy "canonical wins"
-        # behaviour exercised by ``test_parse_company_canonical_wins_over_alias``.
-        # This dedup only collapses overlaps between canonical and alias tags;
-        # non-overlapping periods (e.g. pre-ASC 606 years under one tag and
-        # post-ASC 606 years under another) are preserved via the union.
         if len(candidates) > 1:
             seen: set[tuple] = set()
             deduped: list[dict] = []
@@ -232,12 +217,7 @@ def parse_company(
     df["filed"] = pd.to_datetime(df["filed"], errors="coerce")
     df = df.dropna(subset=["end", "filed"])
 
-    # Scale correction: some filers report USD values in thousands instead of dollars.
-    # Controlled by the ``scale_correction`` parameter:
-    #   "off"   — never apply (default; protects legitimate micro/nano-caps).
-    #   "auto"  — apply only when ≥2 distinct USD concepts are ALL below the
-    #             threshold; emits a visible warning so users can audit it.
-    #   "force" — always multiply regardless of threshold (known-thousands filers).
+    # Scale correction (config-driven, opt-in).
     df["scale_corrected"] = False
     usd_mask = ~df["concept"].str.split(":").str[-1].isin(_SHARE_CONCEPTS)
 
@@ -251,8 +231,6 @@ def parse_company(
     elif scale_correction == "auto":
         if usd_mask.any():
             usd_df = df.loc[usd_mask]
-            # Require at least TWO distinct USD concepts below the threshold before
-            # firing — a single small value is insufficient evidence.
             concepts_below = (
                 usd_df.groupby("concept")["val"]
                 .apply(lambda s: s.abs().max() < scale_correction_threshold)
@@ -269,12 +247,8 @@ def parse_company(
                 )
     # scale_correction == "off": do nothing
 
-    # Duration in days; -1 if start missing (instantaneous entries, e.g. balance sheet).
     df["duration_days"] = (df["end"] - df["start"]).dt.days.where(df["start"].notna(), -1)
 
-    # Within-filing dedup: a single filing can contain both a discrete quarter and a YTD
-    # cumulative entry for the same (concept, end). Prefer the discrete quarter.
-    # We dedup on (concept, end, filed) so restatements filed on different dates are preserved.
     df["_is_quarterly"] = is_quarterly(df["duration_days"]).astype(int)
     df = (
         df.sort_values(["filed", "_is_quarterly"])
@@ -282,11 +256,6 @@ def parse_company(
         .drop(columns=["_is_quarterly"])
     )
 
-    # Cross-filing dedup: for each (concept, end), keep only the EARLIEST filing of
-    # each distinct value. Later re-filings of the same unchanged value — e.g. a prior
-    # period appearing as comparative data in a subsequent 10-K — would inflate the
-    # PIT "known date" by years and must be dropped. Genuine restatements (value changes
-    # between filings) are preserved as new rows so the query layer can track them.
     df = df.sort_values(["concept", "end", "filed"])
     prev_val = df.groupby(["concept", "end"], sort=False)["val"].shift(1)
     keep = prev_val.isna() | ~_values_equal_tol(df["val"], prev_val, df["concept"])
@@ -296,18 +265,17 @@ def parse_company(
 
 
 def _parse_one_for_pool(
-    args: tuple[str, str, list[str] | None, Path, list[str], str, float],
+    args: tuple[
+        str, str, list[str] | None, Path, list[str], str, float,
+        dict[str, str], dict[str, str],
+    ],
 ) -> tuple[str, pd.DataFrame]:
-    """Top-level helper for ProcessPoolExecutor (must be picklable, hence not a closure).
-
-    Args:
-        args: tuple of (ticker, cik_padded, concepts, facts_dir, forms,
-              scale_correction, scale_correction_threshold).
-
-    Returns:
-        (ticker, parsed DataFrame). DataFrame may be empty.
-    """
-    ticker, cik_padded, concepts, facts_dir, forms, scale_correction, scale_correction_threshold = args
+    """Top-level helper for ProcessPoolExecutor (must be picklable)."""
+    (
+        ticker, cik_padded, concepts, facts_dir, forms,
+        scale_correction, scale_correction_threshold,
+        alias_map, lossy_alias_map,
+    ) = args
     df = parse_company(
         cik_padded=cik_padded,
         concepts=concepts,
@@ -315,6 +283,8 @@ def _parse_one_for_pool(
         forms=forms,
         scale_correction=scale_correction,
         scale_correction_threshold=scale_correction_threshold,
+        alias_map=alias_map,
+        lossy_alias_map=lossy_alias_map,
     )
     return ticker, df
 
@@ -325,20 +295,7 @@ def parse_all(
     force: bool = False,
     n_workers: int | None = None,
 ) -> pd.DataFrame:
-    """Parse all companies in cik_map into a single PIT master parquet.
-
-    Args:
-        config:    pipeline configuration.
-        cik_map:   DataFrame indexed by ticker with a 'cik' column.
-        force:     re-parse even if pit_financials.parquet already exists.
-        n_workers: number of worker processes for parallel parsing.
-                   ``None`` (default) uses ``os.cpu_count()`` (or 1 if unavailable).
-                   ``1`` runs serially, skipping the process pool entirely — useful
-                   for debugging (cleaner stack traces) and single-core environments.
-
-    Returns:
-        Master DataFrame with an additional 'ticker' column.
-    """
+    """Parse all companies in cik_map into a single PIT master parquet."""
     config.ensure_dirs()
     out_path = config.data_dir / "pit_financials.parquet"
 
@@ -351,10 +308,13 @@ def parse_all(
     if n_workers < 1:
         raise ValueError(f"n_workers must be >= 1, got {n_workers}")
 
+    effective_lossy_map: dict[str, str] = (
+        LOSSY_CONCEPT_ALIASES if config.lossy_aliases_enabled else {}
+    )
+
     all_frames: list[pd.DataFrame] = []
 
     if n_workers == 1:
-        # Serial path: no pool overhead, clean stack traces for debugging.
         for ticker, row in tqdm(cik_map.iterrows(), total=len(cik_map), desc="Parsing"):
             cik_padded = str(row["cik"])
             df = parse_company(
@@ -364,13 +324,14 @@ def parse_all(
                 forms=config.forms,
                 scale_correction=config.scale_correction,
                 scale_correction_threshold=config.scale_correction_threshold,
+                alias_map=CONCEPT_ALIASES,
+                lossy_alias_map=effective_lossy_map,
             )
             if df.empty:
                 continue
             df.insert(0, "ticker", str(ticker))
             all_frames.append(df)
     else:
-        # Parallel path: fan out across processes — JSON parsing is CPU-bound.
         tasks = [
             (
                 str(ticker),
@@ -380,6 +341,8 @@ def parse_all(
                 config.forms,
                 config.scale_correction,
                 config.scale_correction_threshold,
+                CONCEPT_ALIASES,
+                effective_lossy_map,
             )
             for ticker, row in cik_map.iterrows()
         ]
@@ -400,8 +363,6 @@ def parse_all(
 
     master = pd.concat(all_frames, ignore_index=True)
 
-    # Atomic write: write to .tmp then rename, so a crash mid-write never leaves
-    # a truncated parquet behind that later reads would choke on.
     tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
     try:
         master.to_parquet(tmp_path, index=False)

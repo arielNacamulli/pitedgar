@@ -23,17 +23,17 @@ DEFAULT_CONCEPTS = [
     "us-gaap:ResearchAndDevelopmentExpense",
 ]
 
-# Explicit priority ordering for alias resolution. When two aliases both report the
-# same (end, filed, form) for a canonical concept, the alias that appears earlier in
-# the list wins. List order = priority; canonical always wins over all aliases.
+# Explicit priority ordering for (non-lossy) alias resolution. When two aliases both
+# report the same (end, filed, form) for a canonical concept, the alias that appears
+# earlier in the list wins. List order = priority; canonical always wins over aliases.
 #
-# This is the authoritative source of truth — CONCEPT_ALIASES (public API) is derived
-# from it so that issue #14's dict-split refactor (CONCEPT_ALIASES / LOSSY_CONCEPT_ALIASES)
-# can work on top without conflicts.
+# Only genuinely synonymous / deprecated tags belong here. Tags that are financially
+# non-equivalent to their canonical target are in LOSSY_CONCEPT_ALIASES below and
+# require opt-in via PitEdgarConfig.lossy_aliases_enabled.
 CONCEPT_ALIAS_PRIORITY: dict[str, list[str]] = {
     # --- Revenue family -> us-gaap:Revenues ---
-    # Post-ASC 606 standard tag (mandatory from 2018 onward for most filers) has
-    # highest priority; deprecated pre-ASC 606 tags are tried in descending order.
+    # Post-ASC 606 standard tag (mandatory from 2018 onward) has highest priority;
+    # deprecated pre-ASC 606 tags are tried in descending order.
     "us-gaap:Revenues": [
         "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax",
         "us-gaap:RevenueFromContractWithCustomerIncludingAssessedTax",
@@ -41,37 +41,48 @@ CONCEPT_ALIAS_PRIORITY: dict[str, list[str]] = {
         "us-gaap:SalesRevenueGoodsNet",
         "us-gaap:Revenue",
     ],
-    # --- Net income family -> us-gaap:NetIncomeLoss ---
-    # CAVEAT: ProfitLoss is NOT identical to NetIncomeLoss — ProfitLoss is the
-    # consolidated bottom line BEFORE allocating income to non-controlling (minority)
-    # interests, while NetIncomeLoss is attributable to the parent only. We map it
-    # as a fallback so companies that only file ProfitLoss are still represented.
-    "us-gaap:NetIncomeLoss": ["us-gaap:ProfitLoss"],
     # --- Cash family -> us-gaap:CashAndCashEquivalentsAtCarryingValue ---
-    # Post-ASU 2016-18 tag that bundles restricted cash with cash & equivalents has
-    # higher priority; bare "Cash" is the most generic fallback.
+    # Bare "Cash" is a generic fallback used by a minority of (older/smaller) filers.
     "us-gaap:CashAndCashEquivalentsAtCarryingValue": [
-        "us-gaap:CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
         "us-gaap:Cash",
     ],
-    # --- Long-term debt -> us-gaap:LongTermDebt ---
-    # Many filers report only the noncurrent portion under this tag.
-    "us-gaap:LongTermDebt": ["us-gaap:LongTermDebtNoncurrent"],
     # --- Operating cash flow ---
     "us-gaap:NetCashProvidedByUsedInOperatingActivities": ["us-gaap:OperatingCashFlow"],
 }
 
 # Maps deprecated/variant XBRL tags to their canonical concept in DEFAULT_CONCEPTS.
-# Applied at parse time so the parquet always uses canonical names. The parser tries
-# the canonical tag first, falling back to each alias only if the canonical is absent —
-# so when both are present the canonical value wins (no double-counting).
-#
 # Derived from CONCEPT_ALIAS_PRIORITY so the public API remains stable and the parser
 # priority order no longer depends on Python dict insertion order.
 CONCEPT_ALIASES: dict[str, str] = {
     alias: canonical
     for canonical, aliases in CONCEPT_ALIAS_PRIORITY.items()
     for alias in aliases
+}
+
+# Aliases that are financially NON-EQUIVALENT to their canonical targets.
+# These are kept separate because substituting them silently can mislead analysts:
+#
+#   ProfitLoss → NetIncomeLoss
+#       ProfitLoss is the consolidated bottom line BEFORE allocating income to
+#       non-controlling (minority) interests; NetIncomeLoss is attributable to
+#       the parent only.
+#
+#   LongTermDebtNoncurrent → LongTermDebt
+#       LongTermDebtNoncurrent excludes the current portion of long-term debt;
+#       LongTermDebt includes it.
+#
+#   CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents
+#       → CashAndCashEquivalentsAtCarryingValue
+#       The post-ASU 2016-18 tag bundles restricted cash with unrestricted cash,
+#       inflating the figure relative to the canonical carrying-value tag.
+#
+# These aliases are DISABLED by default (PitEdgarConfig.lossy_aliases_enabled=False).
+# When enabled the parser records the original tag in the `alias_source` column so
+# analysts can filter or audit the substitutions.
+LOSSY_CONCEPT_ALIASES: dict[str, str] = {
+    "us-gaap:ProfitLoss": "us-gaap:NetIncomeLoss",
+    "us-gaap:CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents": "us-gaap:CashAndCashEquivalentsAtCarryingValue",
+    "us-gaap:LongTermDebtNoncurrent": "us-gaap:LongTermDebt",
 }
 
 # Amendments (10-K/A, 10-Q/A) carry corrected — and often substantially restated —
@@ -106,6 +117,11 @@ class PitEdgarConfig(BaseModel):
     #           filers known a priori to report in thousands).
     scale_correction: Literal["off", "auto", "force"] = "off"
     scale_correction_threshold: float = 1_000_000.0
+    # When False (default) the three financially non-equivalent aliases in
+    # LOSSY_CONCEPT_ALIASES are NOT applied, so a filer that only reports e.g.
+    # ProfitLoss will have no rows for us-gaap:NetIncomeLoss. Set to True to apply
+    # them anyway (rows will carry the original tag in the `alias_source` column).
+    lossy_aliases_enabled: bool = False
 
     model_config = {"arbitrary_types_allowed": True}
 
