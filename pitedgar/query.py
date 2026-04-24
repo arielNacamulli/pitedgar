@@ -1,8 +1,10 @@
 """PIT query API over the master parquet."""
 
+import difflib
 from pathlib import Path
 
 import pandas as pd
+from loguru import logger
 
 from pitedgar.periods import Q_MAX, Q_MIN, is_annual, is_quarterly
 
@@ -235,22 +237,7 @@ def _ttm_events(grp: pd.DataFrame, min_periods: int = 4) -> pd.DataFrame:
 
 
 class PitQuery:
-    """Query point-in-time financial data from a master parquet file.
-
-    Memory footprint: by default the full parquet is loaded into RAM.  For
-    R3000-scale parquets (all us-gaap concepts, 10 years) this can be multiple
-    GB.  Pass one or more of the optional filter kwargs to enable pyarrow
-    predicate pushdown and load only the slice you need — typically cutting peak
-    memory from several GB to a few hundred MB.
-
-    Args:
-        parquet_path: path to the master ``pit_financials.parquet``.
-        tickers:      load only rows whose ``ticker`` is in this list.
-                      Tickers are upcased automatically.
-        concepts:     load only rows whose ``concept`` is in this list.
-        since:        load only rows whose ``filed`` date is >= this value
-                      (ISO string or ``pd.Timestamp``).
-    """
+    """Query point-in-time financial data from a master parquet file."""
 
     def __init__(
         self,
@@ -258,6 +245,7 @@ class PitQuery:
         tickers: list[str] | None = None,
         concepts: list[str] | None = None,
         since: str | pd.Timestamp | None = None,
+        strict_concepts: bool = False,
     ) -> None:
         filters: list[tuple] = []
         if tickers:
@@ -265,22 +253,50 @@ class PitQuery:
         if concepts:
             filters.append(("concept", "in", concepts))
         if since is not None:
-            # Normalise to an ISO date string so the filter works regardless of
-            # whether the parquet stores `filed` as string or timestamp dtype.
             since_str = pd.Timestamp(since).strftime("%Y-%m-%d")
             filters.append(("filed", ">=", since_str))
         self.data = pd.read_parquet(parquet_path, filters=filters or None)
+        self.strict_concepts = strict_concepts
+        self._warned_concepts: set[str] = set()
         self.data["filed"] = pd.to_datetime(self.data["filed"], errors="coerce")
         self.data["end"] = pd.to_datetime(self.data["end"], errors="coerce")
-        # `start` is required by YTD-chain synthesis in ttm(); older fixtures and
-        # legacy parquets may lack it, in which case synthesis silently no-ops.
         if "start" in self.data.columns:
             self.data["start"] = pd.to_datetime(self.data["start"], errors="coerce")
-        # Ensure duration_days exists for period classification. The parser always
-        # writes this column; for test fixtures or legacy parquets without it,
-        # infer from form (10-Q → 91, 10-K → 365) as a safe approximation.
         if "duration_days" not in self.data.columns:
             self.data["duration_days"] = self.data["form"].map({"10-Q": 91, "10-K": 365}).fillna(-1)
+        self._known_concepts: set[str] = set(self.data["concept"].unique())
+
+    # ------------------------------------------------------------------
+    # Concept validation
+    # ------------------------------------------------------------------
+
+    def known_concepts(self) -> list[str]:
+        """Return a sorted list of all concept strings present in the loaded parquet."""
+        return sorted(self._known_concepts)
+
+    def _check_concept(self, concept: str) -> None:
+        """Validate *concept* against the loaded data; warn or raise on unknown concepts.
+
+        - Known concept: no-op.
+        - Unknown + strict_concepts=True: raise KeyError with suggestions.
+        - Unknown + strict_concepts=False: emit a one-shot loguru warning (once per
+          concept per instance) with up to 3 nearest-match suggestions.
+        """
+        if concept in self._known_concepts:
+            return
+        suggestions = difflib.get_close_matches(concept, self._known_concepts, n=3, cutoff=0.6)
+        if self.strict_concepts:
+            raise KeyError(
+                f"Unknown concept {concept!r}. "
+                f"Nearest: {suggestions}. See q.known_concepts() for available."
+            )
+        if concept not in self._warned_concepts:
+            self._warned_concepts.add(concept)
+            logger.warning(
+                "Unknown concept {!r}. Nearest: {}. See q.known_concepts() for full list.",
+                concept,
+                suggestions,
+            )
 
     # ------------------------------------------------------------------
     # Public API
@@ -320,6 +336,7 @@ class PitQuery:
 
         Returns DataFrame with columns: ticker, val, filed, end, form, age_days
         """
+        self._check_concept(concept)
         if isinstance(tickers, str):
             tickers = [tickers]
         as_of_ts = pd.Timestamp(as_of_date)
@@ -389,6 +406,7 @@ class PitQuery:
         Returns DataFrame with columns: ticker, concept, end, filed, val, form, accn.
         For each period end, shows the latest-filed (restated) value.
         """
+        self._check_concept(concept)
         mask = (self.data["ticker"] == ticker) & (self.data["concept"] == concept)
 
         # Classify by duration_days, not form: some filers (notably Apple for
@@ -435,6 +453,7 @@ class PitQuery:
 
         Returns DataFrame with columns: ticker, concept, filed, ttm_val, n_periods
         """
+        self._check_concept(concept)
         base_mask = (self.data["ticker"] == ticker) & (self.data["concept"] == concept)
         sub_all = self.data.loc[base_mask]
         sub_k = sub_all.loc[is_annual(sub_all["duration_days"], sub_all["form"])]
@@ -517,6 +536,7 @@ class PitQuery:
         Returns DataFrame with columns:
             as_of_date, ticker, ttm_val, n_periods, filed, age_days
         """
+        self._check_concept(concept)
         if isinstance(as_of_dates, str):
             as_of_dates = [as_of_dates]
         dates = pd.DatetimeIndex(pd.to_datetime(as_of_dates)).sort_values()
@@ -661,6 +681,7 @@ class PitQuery:
         Returns DataFrame with columns:
             as_of_date, ticker, val, filed, end, form, age_days
         """
+        self._check_concept(concept)
         if isinstance(as_of_dates, str):
             as_of_dates = [as_of_dates]
         dates = pd.DatetimeIndex(pd.to_datetime(as_of_dates)).sort_values()

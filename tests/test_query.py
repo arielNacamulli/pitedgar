@@ -1346,12 +1346,34 @@ def test_ttm_cross_section_matches_ttm_on_ytd_universe(tmp_path):
 
 # ---------------------------------------------------------------------------
 # PitQuery.__init__ filter pushdown kwargs (#24)
+# Issue #29: unknown concept validation
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture
 def multi_ticker_parquet(tmp_path):
     """Parquet with AAPL, MSFT, and two concepts for filter tests."""
+    records = [
+        {"ticker": "AAPL", "concept": "us-gaap:Revenues", "end": "2022-12-31",
+         "filed": "2023-02-02", "val": 394328000000.0, "form": "10-K", "accn": "A1"},
+        {"ticker": "AAPL", "concept": "us-gaap:Assets", "end": "2022-12-31",
+         "filed": "2023-02-02", "val": 352755000000.0, "form": "10-K", "accn": "A2"},
+        {"ticker": "MSFT", "concept": "us-gaap:Revenues", "end": "2022-06-30",
+         "filed": "2022-07-28", "val": 198270000000.0, "form": "10-K", "accn": "B1"},
+        {"ticker": "MSFT", "concept": "us-gaap:Assets", "end": "2022-06-30",
+         "filed": "2022-07-28", "val": 364840000000.0, "form": "10-K", "accn": "B2"},
+        {"ticker": "AAPL", "concept": "us-gaap:Revenues", "end": "2021-12-31",
+         "filed": "2022-01-28", "val": 365817000000.0, "form": "10-K", "accn": "A0"},
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    return path
+
+
+@pytest.fixture
+def concept_check_parquet(tmp_path):
+    """Small parquet with a single known concept: us-gaap:Revenues."""
     records = [
         {
             "ticker": "AAPL",
@@ -1434,3 +1456,85 @@ def test_init_without_filters_is_backwards_compatible(multi_ticker_parquet):
     assert set(q.data["ticker"].unique()) == {"AAPL", "MSFT"}
     assert set(q.data["concept"].unique()) == {"us-gaap:Revenues", "us-gaap:Assets"}
     assert len(q.data) == 5
+def test_known_concepts_returns_sorted_list(concept_check_parquet):
+    """known_concepts() returns a sorted list of all unique concept strings."""
+    q = PitQuery(concept_check_parquet)
+    concepts = q.known_concepts()
+    assert isinstance(concepts, list)
+    assert concepts == sorted(concepts)
+    assert "us-gaap:Revenues" in concepts
+
+
+def test_unknown_concept_warns_and_suggests(concept_check_parquet):
+    """Typo'd concept emits a loguru warning mentioning a near-match suggestion."""
+    import sys
+    from loguru import logger
+
+    q = PitQuery(concept_check_parquet)
+    warnings: list[str] = []
+
+    def _sink(message):
+        warnings.append(str(message))
+
+    handler_id = logger.add(_sink, level="WARNING")
+    try:
+        # "us-gaap:Revenue" is close to "us-gaap:Revenues" — difflib should suggest it
+        q.as_of("AAPL", "us-gaap:Revenue", "2023-06-01")
+    finally:
+        logger.remove(handler_id)
+
+    assert len(warnings) == 1
+    assert "us-gaap:Revenue" in warnings[0]
+    assert "Revenues" in warnings[0]
+
+
+def test_unknown_concept_strict_raises(concept_check_parquet):
+    """With strict_concepts=True an unknown concept raises KeyError."""
+    q = PitQuery(concept_check_parquet, strict_concepts=True)
+    with pytest.raises(KeyError, match="us-gaap:Revenue"):
+        q.as_of("AAPL", "us-gaap:Revenue", "2023-06-01")
+
+
+def test_unknown_concept_warn_once_per_concept_per_instance(concept_check_parquet):
+    """The warning fires exactly once per unique unknown concept per PitQuery instance."""
+    from loguru import logger
+
+    q = PitQuery(concept_check_parquet)
+    warnings: list[str] = []
+
+    def _sink(message):
+        warnings.append(str(message))
+
+    handler_id = logger.add(_sink, level="WARNING")
+    try:
+        q.as_of("AAPL", "us-gaap:Revenue", "2023-06-01")
+        q.as_of("AAPL", "us-gaap:Revenue", "2023-06-01")
+        q.history("AAPL", "us-gaap:Revenue")
+    finally:
+        logger.remove(handler_id)
+
+    # Three calls with the same typo on the same instance → only one warning
+    assert len(warnings) == 1
+
+
+def test_unknown_concept_warns_independently_per_new_instance(concept_check_parquet):
+    """A new PitQuery instance resets the warned-concepts cache."""
+    from loguru import logger
+
+    warnings: list[str] = []
+
+    def _sink(message):
+        warnings.append(str(message))
+
+    handler_id = logger.add(_sink, level="WARNING")
+    try:
+        q1 = PitQuery(concept_check_parquet)
+        q1.as_of("AAPL", "us-gaap:Revenue", "2023-06-01")
+
+        q2 = PitQuery(concept_check_parquet)
+        q2.as_of("AAPL", "us-gaap:Revenue", "2023-06-01")
+    finally:
+        logger.remove(handler_id)
+
+    # Two different instances → two warnings
+    assert len(warnings) == 2
