@@ -3,7 +3,7 @@
 import pandas as pd
 import pytest
 
-from pitedgar.query import PitQuery
+from pitedgar.query import PitQuery, _derive_quarterly_from_ytd
 
 CONCEPT = "us-gaap:Revenues"
 
@@ -1654,3 +1654,121 @@ def test_unknown_concept_warns_independently_per_new_instance(concept_check_parq
 
     # Two different instances → two warnings
     assert len(warnings) == 2
+# Issue #17: O(N+M) YTD synthesis — no cartesian product on restatement
+# ---------------------------------------------------------------------------
+
+
+def _make_ytd_df(prev_filings: list[tuple], curr_filings: list[tuple]) -> pd.DataFrame:
+    """Build a DataFrame with prev-end and curr-end YTD rows for _derive_quarterly_from_ytd.
+
+    prev_filings: list of (filed, val) for the 'prev' YTD end (e.g. Q1 cumulative)
+    curr_filings: list of (filed, val) for the 'curr' YTD end (e.g. Q2 cumulative)
+
+    Both share the same start (fiscal year start) so they form a consecutive YTD pair.
+    The prev end is exactly 91 days before the curr end.
+    """
+    start = pd.Timestamp("2024-01-01")
+    prev_end = pd.Timestamp("2024-03-31")  # ~90d after start
+    curr_end = pd.Timestamp("2024-06-30")  # ~91d after prev_end (181d after start)
+    rows = []
+    for i, (filed, val) in enumerate(prev_filings):
+        rows.append(
+            {
+                "start": start,
+                "end": prev_end,
+                "filed": pd.Timestamp(filed),
+                "val": val,
+                "form": "10-Q",
+                "accn": f"PREV{i}",
+                "duration_days": 90,
+            }
+        )
+    for i, (filed, val) in enumerate(curr_filings):
+        rows.append(
+            {
+                "start": start,
+                "end": curr_end,
+                "filed": pd.Timestamp(filed),
+                "val": val,
+                "form": "10-Q",
+                "accn": f"CURR{i}",
+                "duration_days": 181,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def test_ytd_synth_no_cartesian_on_restatement():
+    """5 prev × 5 curr filings must yield ≤ 10 synthetic rows, not 25."""
+    prev_filings = [
+        ("2024-04-15", 100.0),
+        ("2024-04-20", 101.0),
+        ("2024-04-25", 102.0),
+        ("2024-04-30", 103.0),
+        ("2024-05-05", 104.0),
+    ]
+    curr_filings = [
+        ("2024-07-15", 200.0),
+        ("2024-07-20", 201.0),
+        ("2024-07-25", 202.0),
+        ("2024-07-30", 203.0),
+        ("2024-08-05", 204.0),
+    ]
+    df = _make_ytd_df(prev_filings, curr_filings)
+    result = _derive_quarterly_from_ytd(df)
+    # Must be bounded by N+M = 10, not N*M = 25.
+    assert len(result) <= 10, f"Expected ≤ 10 rows, got {len(result)}"
+    # All emitted rows must have the DERIVED_YTD_DIFF marker.
+    assert result["accn"].str.endswith(":DERIVED_YTD_DIFF").all()
+
+
+def test_ytd_synth_pit_correctness_after_prev_restatement():
+    """Synthetic row at curr.filed must use the ORIGINAL prev value (the only one
+    known at curr.filed), not any later prev restatement."""
+    # curr filed 2024-07-15; prev original filed 2024-04-15 (val=100),
+    # prev restated filed 2024-08-01 (val=110, AFTER curr).
+    prev_filings = [
+        ("2024-04-15", 100.0),  # original prev
+        ("2024-08-01", 110.0),  # restatement of prev, after curr is filed
+    ]
+    curr_filings = [
+        ("2024-07-15", 200.0),
+    ]
+    df = _make_ytd_df(prev_filings, curr_filings)
+    result = _derive_quarterly_from_ytd(df)
+
+    # Row at curr.filed (2024-07-15): prev not yet restated → uses val=100.
+    at_curr = result[result["filed"] == pd.Timestamp("2024-07-15")]
+    assert len(at_curr) == 1
+    assert at_curr.iloc[0]["val"] == pytest.approx(200.0 - 100.0)
+
+    # Row at prev restatement date (2024-08-01): uses restated prev val=110.
+    at_restate = result[result["filed"] == pd.Timestamp("2024-08-01")]
+    assert len(at_restate) == 1
+    assert at_restate.iloc[0]["val"] == pytest.approx(200.0 - 110.0)
+
+
+def test_ytd_synth_pit_correctness_after_curr_restatement():
+    """Each curr restatement generates a new synthetic row pairing it with the
+    then-latest prev value (no look-ahead into future prev restatements)."""
+    # prev filed 2024-04-15 (only one version, val=100).
+    # curr: original filed 2024-07-15 (val=200), restated 2024-08-01 (val=210).
+    prev_filings = [
+        ("2024-04-15", 100.0),
+    ]
+    curr_filings = [
+        ("2024-07-15", 200.0),  # original curr
+        ("2024-08-01", 210.0),  # restated curr
+    ]
+    df = _make_ytd_df(prev_filings, curr_filings)
+    result = _derive_quarterly_from_ytd(df)
+
+    # Synthetic at original curr filed: val = 200 - 100 = 100.
+    at_orig = result[result["filed"] == pd.Timestamp("2024-07-15")]
+    assert len(at_orig) == 1
+    assert at_orig.iloc[0]["val"] == pytest.approx(100.0)
+
+    # Synthetic at restated curr filed: val = 210 - 100 = 110.
+    at_restate = result[result["filed"] == pd.Timestamp("2024-08-01")]
+    assert len(at_restate) == 1
+    assert at_restate.iloc[0]["val"] == pytest.approx(110.0)
