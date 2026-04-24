@@ -52,8 +52,10 @@ _RETRYABLE_EXCEPTIONS: tuple[type[BaseException], ...] = (
     requests.Timeout,
     requests.exceptions.ChunkedEncodingError,
 )
+_RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({429, 502, 503, 504})
 _DEFAULT_MAX_RETRIES = 4
 _DEFAULT_BACKOFF_BASE_SECONDS = 2.0
+_MAX_TOTAL_WAIT_SECONDS = 300
 
 
 def _compute_sha256(path: Path, chunk_size: int = 1 << 20) -> str:
@@ -119,18 +121,48 @@ def _download_with_retries(
 ) -> dict[str, str]:
     """Retry transient network failures with exponential backoff.
 
+    HTTP 429/502/503/504 responses are treated as retryable; a ``Retry-After``
+    header is honoured when present. Total accumulated sleep is capped at
+    ``_MAX_TOTAL_WAIT_SECONDS`` (300 s).
     Returns the response headers from the successful attempt.
     """
     attempt = 0
+    total_waited = 0.0
     while True:
         try:
             resp_headers = _stream_to_file(url, headers, dest, timeout=timeout)
             return resp_headers
+        except requests.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if status not in _RETRYABLE_STATUS_CODES:
+                raise
+            attempt += 1
+            if attempt > max_retries:
+                raise
+            retry_after = exc.response.headers.get("Retry-After") if exc.response is not None else None
+            if retry_after is not None:
+                try:
+                    wait = float(retry_after)
+                except ValueError:
+                    wait = backoff_base**attempt
+                sleep_s = max(wait, backoff_base**attempt)
+            else:
+                sleep_s = backoff_base**attempt
+            if total_waited + sleep_s > _MAX_TOTAL_WAIT_SECONDS:
+                raise
+            total_waited += sleep_s
+            logger.warning(
+                f"Download attempt {attempt}/{max_retries} failed (HTTP {status}); retrying in {sleep_s:.1f}s…"
+            )
+            time.sleep(sleep_s)
         except _RETRYABLE_EXCEPTIONS as exc:
             attempt += 1
             if attempt > max_retries:
                 raise
             sleep_s = backoff_base**attempt
+            if total_waited + sleep_s > _MAX_TOTAL_WAIT_SECONDS:
+                raise
+            total_waited += sleep_s
             logger.warning(
                 f"Download attempt {attempt}/{max_retries} failed ({exc!r}); retrying in {sleep_s:.1f}s…"
             )
