@@ -1040,3 +1040,110 @@ def test_parse_all_invalid_n_workers(tmp_path):
     )
     with pytest.raises(ValueError, match="n_workers"):
         parse_all(config, cik_map, n_workers=0)
+
+
+def test_alias_precedence_follows_priority_list_order(tmp_path):
+    """When two aliases collide on (end, filed, form), the alias listed earlier in
+    CONCEPT_ALIAS_PRIORITY wins — independent of dict insertion order."""
+    # RevenueFromContractWithCustomerExcludingAssessedTax is index 0 in the priority
+    # list for us-gaap:Revenues; SalesRevenueNet is index 2. ExcludingAssessedTax
+    # must therefore win when both report the same (end, filed, form).
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "RevenueFromContractWithCustomerExcludingAssessedTax": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2023-01-01",
+                                "end": "2023-12-31",
+                                "filed": "2024-02-01",
+                                "val": 111_000_000,
+                                "form": "10-K",
+                                "accn": "EXCL",
+                            },
+                        ]
+                    }
+                },
+                "SalesRevenueNet": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2023-01-01",
+                                "end": "2023-12-31",
+                                "filed": "2024-02-01",
+                                "val": 999_000_000,
+                                "form": "10-K",
+                                "accn": "SRN",
+                            },
+                        ]
+                    }
+                },
+            }
+        }
+    }
+    cik = "0000000200"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+    df = parse_company(cik, ["us-gaap:Revenues"], tmp_path, ["10-K"])
+    assert len(df) == 1
+    # ExcludingAssessedTax (higher priority) must win
+    assert df.iloc[0]["val"] == pytest.approx(111_000_000)
+    assert df.iloc[0]["accn"] == "EXCL"
+
+
+def test_reversing_priority_changes_winner(tmp_path, monkeypatch):
+    """Monkeypatching CONCEPT_ALIAS_PRIORITY to reverse the order must flip the winner —
+    regression shield to ensure the parser actually honours the priority list."""
+    import pitedgar.config as config_mod
+    import pitedgar.parser as parser_mod
+
+    # Reverse the Revenues priority list so SalesRevenueNet beats ExcludingAssessedTax
+    reversed_priority = {
+        "us-gaap:Revenues": list(
+            reversed(config_mod.CONCEPT_ALIAS_PRIORITY["us-gaap:Revenues"])
+        ),
+    }
+    monkeypatch.setattr(config_mod, "CONCEPT_ALIAS_PRIORITY", reversed_priority)
+    monkeypatch.setattr(parser_mod, "CONCEPT_ALIAS_PRIORITY", reversed_priority)
+
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "RevenueFromContractWithCustomerExcludingAssessedTax": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2023-01-01",
+                                "end": "2023-12-31",
+                                "filed": "2024-02-01",
+                                "val": 111_000_000,
+                                "form": "10-K",
+                                "accn": "EXCL",
+                            },
+                        ]
+                    }
+                },
+                "SalesRevenueNet": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2023-01-01",
+                                "end": "2023-12-31",
+                                "filed": "2024-02-01",
+                                "val": 999_000_000,
+                                "form": "10-K",
+                                "accn": "SRN",
+                            },
+                        ]
+                    }
+                },
+            }
+        }
+    }
+    cik = "0000000201"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+    df = parse_company(cik, ["us-gaap:Revenues"], tmp_path, ["10-K"])
+    assert len(df) == 1
+    # With reversed priority, SalesRevenueNet (now index 0) must win
+    assert df.iloc[0]["val"] == pytest.approx(999_000_000)
+    assert df.iloc[0]["accn"] == "SRN"

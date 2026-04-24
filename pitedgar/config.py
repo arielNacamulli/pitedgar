@@ -22,37 +22,55 @@ DEFAULT_CONCEPTS = [
     "us-gaap:ResearchAndDevelopmentExpense",
 ]
 
-# Maps deprecated/variant XBRL tags to their canonical concept in DEFAULT_CONCEPTS.
-# Applied at parse time so the parquet always uses canonical names. The parser tries
-# the canonical tag first, falling back to each alias only if the canonical is absent —
-# so when both are present the canonical value wins (no double-counting).
-CONCEPT_ALIASES: dict[str, str] = {
+# Explicit priority ordering for alias resolution. When two aliases both report the
+# same (end, filed, form) for a canonical concept, the alias that appears earlier in
+# the list wins. List order = priority; canonical always wins over all aliases.
+#
+# This is the authoritative source of truth — CONCEPT_ALIASES (public API) is derived
+# from it so that issue #14's dict-split refactor (CONCEPT_ALIASES / LOSSY_CONCEPT_ALIASES)
+# can work on top without conflicts.
+CONCEPT_ALIAS_PRIORITY: dict[str, list[str]] = {
     # --- Revenue family -> us-gaap:Revenues ---
-    # Post-ASC 606 standard tag (mandatory from 2018 onward for most filers)
-    "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax": "us-gaap:Revenues",
-    # ASC 606 variant that includes assessed taxes (e.g. sales tax) in the topline
-    "us-gaap:RevenueFromContractWithCustomerIncludingAssessedTax": "us-gaap:Revenues",
-    # Pre-ASC 606 deprecated tags still used by some filers / historical filings
-    "us-gaap:SalesRevenueNet": "us-gaap:Revenues",
-    "us-gaap:SalesRevenueGoodsNet": "us-gaap:Revenues",
-    "us-gaap:Revenue": "us-gaap:Revenues",
+    # Post-ASC 606 standard tag (mandatory from 2018 onward for most filers) has
+    # highest priority; deprecated pre-ASC 606 tags are tried in descending order.
+    "us-gaap:Revenues": [
+        "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax",
+        "us-gaap:RevenueFromContractWithCustomerIncludingAssessedTax",
+        "us-gaap:SalesRevenueNet",
+        "us-gaap:SalesRevenueGoodsNet",
+        "us-gaap:Revenue",
+    ],
     # --- Net income family -> us-gaap:NetIncomeLoss ---
     # CAVEAT: ProfitLoss is NOT identical to NetIncomeLoss — ProfitLoss is the
     # consolidated bottom line BEFORE allocating income to non-controlling (minority)
     # interests, while NetIncomeLoss is attributable to the parent only. We map it
-    # as a fallback so companies that only file ProfitLoss are still represented;
-    # the canonical-first lookup ensures NetIncomeLoss wins whenever both are present.
-    "us-gaap:ProfitLoss": "us-gaap:NetIncomeLoss",
+    # as a fallback so companies that only file ProfitLoss are still represented.
+    "us-gaap:NetIncomeLoss": ["us-gaap:ProfitLoss"],
     # --- Cash family -> us-gaap:CashAndCashEquivalentsAtCarryingValue ---
-    # Post-ASU 2016-18 tag that bundles restricted cash with cash & equivalents
-    "us-gaap:CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents": "us-gaap:CashAndCashEquivalentsAtCarryingValue",
-    # Bare "Cash" tag used by a minority of filers (typically smaller / older filings)
-    "us-gaap:Cash": "us-gaap:CashAndCashEquivalentsAtCarryingValue",
+    # Post-ASU 2016-18 tag that bundles restricted cash with cash & equivalents has
+    # higher priority; bare "Cash" is the most generic fallback.
+    "us-gaap:CashAndCashEquivalentsAtCarryingValue": [
+        "us-gaap:CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+        "us-gaap:Cash",
+    ],
     # --- Long-term debt -> us-gaap:LongTermDebt ---
-    # Many filers report only the noncurrent portion under this tag
-    "us-gaap:LongTermDebtNoncurrent": "us-gaap:LongTermDebt",
+    # Many filers report only the noncurrent portion under this tag.
+    "us-gaap:LongTermDebt": ["us-gaap:LongTermDebtNoncurrent"],
     # --- Operating cash flow ---
-    "us-gaap:OperatingCashFlow": "us-gaap:NetCashProvidedByUsedInOperatingActivities",
+    "us-gaap:NetCashProvidedByUsedInOperatingActivities": ["us-gaap:OperatingCashFlow"],
+}
+
+# Maps deprecated/variant XBRL tags to their canonical concept in DEFAULT_CONCEPTS.
+# Applied at parse time so the parquet always uses canonical names. The parser tries
+# the canonical tag first, falling back to each alias only if the canonical is absent —
+# so when both are present the canonical value wins (no double-counting).
+#
+# Derived from CONCEPT_ALIAS_PRIORITY so the public API remains stable and the parser
+# priority order no longer depends on Python dict insertion order.
+CONCEPT_ALIASES: dict[str, str] = {
+    alias: canonical
+    for canonical, aliases in CONCEPT_ALIAS_PRIORITY.items()
+    for alias in aliases
 }
 
 # Amendments (10-K/A, 10-Q/A) carry corrected — and often substantially restated —
