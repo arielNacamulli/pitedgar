@@ -2175,3 +2175,128 @@ def test_q4_happy_path_still_works(dec_fy_parquet_path):
     assert last["ttm_val"] == pytest.approx(1000.0)
     assert last["n_periods"] == 4
     assert last["filed"] == pd.Timestamp("2026-02-05")
+
+
+# ---------------------------------------------------------------------------
+# Issue #18: TTM non-contiguous quarter span guard (max_ttm_span_days)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def gap_parquet_path(tmp_path):
+    """Quarters in 2020 Q1 and then 2023 Q1-Q3 — a ~2-year gap."""
+    records = [
+        {
+            "ticker": "GAP",
+            "concept": CONCEPT,
+            "end": "2020-03-31",
+            "filed": "2020-05-05",
+            "val": 100.0,
+            "form": "10-Q",
+            "accn": "G0",
+            "duration_days": 91,
+        },
+        {
+            "ticker": "GAP",
+            "concept": CONCEPT,
+            "end": "2023-03-31",
+            "filed": "2023-05-05",
+            "val": 200.0,
+            "form": "10-Q",
+            "accn": "G1",
+            "duration_days": 91,
+        },
+        {
+            "ticker": "GAP",
+            "concept": CONCEPT,
+            "end": "2023-06-30",
+            "filed": "2023-08-05",
+            "val": 300.0,
+            "form": "10-Q",
+            "accn": "G2",
+            "duration_days": 91,
+        },
+        {
+            "ticker": "GAP",
+            "concept": CONCEPT,
+            "end": "2023-09-30",
+            "filed": "2023-11-05",
+            "val": 400.0,
+            "form": "10-Q",
+            "accn": "G3",
+            "duration_days": 91,
+        },
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    return path
+
+
+def test_ttm_drops_non_contiguous_quarters(gap_parquet_path):
+    """TTM with a ~2-year gap between Q1-2020 and Q1-2023 must be empty (default 400d)."""
+    q = PitQuery(gap_parquet_path)
+    # The top-4 quarters include 2020-03-31 and 2023-09-30 → span ~1279d > 400
+    result = q.ttm("GAP", CONCEPT)
+    assert result.empty
+
+
+def test_ttm_drops_non_contiguous_quarters_opt_out(gap_parquet_path):
+    """With max_ttm_span_days=None the non-contiguous TTM is included."""
+    q = PitQuery(gap_parquet_path)
+    result = q.ttm("GAP", CONCEPT, max_ttm_span_days=None)
+    assert not result.empty
+    last = result.iloc[-1]
+    assert last["ttm_val"] == pytest.approx(100.0 + 200.0 + 300.0 + 400.0)
+
+
+def test_ttm_contiguous_default_includes_normal_quarters(ttm_parquet_path):
+    """Regular 4 quarters spanning ~9 months (< 400d) must be emitted."""
+    q = PitQuery(ttm_parquet_path)
+    result = q.ttm("AAPL", CONCEPT)
+    assert not result.empty
+    last = result.iloc[-1]
+    assert last["n_periods"] == 4
+    # end span: 2022-03-26 to 2022-12-31 = ~280 days, well under 400
+    assert last["ttm_end_max"] - last["ttm_end_min"] <= pd.Timedelta(days=400)
+
+
+def test_ttm_exposes_end_min_max_columns(ttm_parquet_path):
+    """ttm() result DataFrame must carry ttm_end_min and ttm_end_max columns."""
+    q = PitQuery(ttm_parquet_path)
+    result = q.ttm("AAPL", CONCEPT)
+    assert "ttm_end_min" in result.columns
+    assert "ttm_end_max" in result.columns
+    last = result.iloc[-1]
+    # The earliest quarter ends 2022-03-26 and the latest 2022-12-31.
+    assert last["ttm_end_min"] == pd.Timestamp("2022-03-26")
+    assert last["ttm_end_max"] == pd.Timestamp("2022-12-31")
+
+
+def test_ttm_cross_section_respects_max_span(gap_parquet_path):
+    """ttm_cross_section with default max_ttm_span_days must drop non-contiguous quarters."""
+    q = PitQuery(gap_parquet_path)
+    result = q.ttm_cross_section(CONCEPT, "2024-01-01", tickers=["GAP"])
+    row = result.iloc[0]
+    # Top-4 spans 2020-03-31 to 2023-09-30 → non-contiguous → NaN
+    assert pd.isna(row["ttm_val"])
+
+
+def test_ttm_cross_section_respects_max_span_opt_out(gap_parquet_path):
+    """ttm_cross_section with max_ttm_span_days=None includes non-contiguous TTM."""
+    q = PitQuery(gap_parquet_path)
+    result = q.ttm_cross_section(CONCEPT, "2024-01-01", tickers=["GAP"], max_ttm_span_days=None)
+    row = result.iloc[0]
+    assert not pd.isna(row["ttm_val"])
+    assert row["ttm_val"] == pytest.approx(100.0 + 200.0 + 300.0 + 400.0)
+
+
+def test_ttm_cross_section_exposes_end_min_max_columns(ttm_parquet_path):
+    """ttm_cross_section result DataFrame must carry ttm_end_min and ttm_end_max columns."""
+    q = PitQuery(ttm_parquet_path)
+    result = q.ttm_cross_section(CONCEPT, "2023-06-01")
+    assert "ttm_end_min" in result.columns
+    assert "ttm_end_max" in result.columns
+    row = result.iloc[0]
+    assert row["ttm_end_min"] == pd.Timestamp("2022-03-26")
+    assert row["ttm_end_max"] == pd.Timestamp("2022-12-31")
