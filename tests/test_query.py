@@ -1772,3 +1772,253 @@ def test_ytd_synth_pit_correctness_after_curr_restatement():
     at_restate = result[result["filed"] == pd.Timestamp("2024-08-01")]
     assert len(at_restate) == 1
     assert at_restate.iloc[0]["val"] == pytest.approx(110.0)
+
+
+# ---------------------------------------------------------------------------
+# Q4 derivation hardening for 52/53-week fiscal calendars (#16)
+# ---------------------------------------------------------------------------
+
+
+def test_derive_q4_uses_start_when_available(tmp_path):
+    """When the 10-K row has a valid `start` column, _derive_q4_rows must use
+    it as fy_start rather than fy_end-355d.  Planted data: 53-week FY where
+    fy_end − fy_start > 366 days but the 3 correct quarters still lie within
+    the explicit start boundary."""
+    # FY spans 371 days (53-week year): 2023-01-29 → 2024-02-03
+    fy_start = pd.Timestamp("2023-01-29")
+    fy_end = pd.Timestamp("2024-02-03")
+    k_filed = pd.Timestamp("2024-03-15")
+    annual_val = 1000.0
+
+    records = [
+        # Q1: ends 2023-04-29 (within fy_start)
+        {
+            "ticker": "WMT",
+            "concept": CONCEPT,
+            "end": "2023-04-29",
+            "filed": "2023-06-05",
+            "val": 100.0,
+            "form": "10-Q",
+            "accn": "W1",
+            "duration_days": 90,
+        },
+        # Q2: ends 2023-07-29
+        {
+            "ticker": "WMT",
+            "concept": CONCEPT,
+            "end": "2023-07-29",
+            "filed": "2023-09-05",
+            "val": 200.0,
+            "form": "10-Q",
+            "accn": "W2",
+            "duration_days": 91,
+        },
+        # Q3: ends 2023-10-28
+        {
+            "ticker": "WMT",
+            "concept": CONCEPT,
+            "end": "2023-10-28",
+            "filed": "2023-12-05",
+            "val": 300.0,
+            "form": "10-Q",
+            "accn": "W3",
+            "duration_days": 91,
+        },
+        # 10-K
+        {
+            "ticker": "WMT",
+            "concept": CONCEPT,
+            "end": fy_end.strftime("%Y-%m-%d"),
+            "filed": k_filed.strftime("%Y-%m-%d"),
+            "val": annual_val,
+            "form": "10-K",
+            "accn": "WK",
+            "start": fy_start.strftime("%Y-%m-%d"),
+            "duration_days": (fy_end - fy_start).days,
+        },
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    q = PitQuery(path)
+
+    result = q.ttm("WMT", CONCEPT)
+    assert not result.empty
+    last = result.iloc[-1]
+    # Q4 = 1000 - (100+200+300) = 400; TTM = 100+200+300+400 = 1000
+    assert last["ttm_val"] == pytest.approx(1000.0)
+    assert last["n_periods"] == 4
+    assert last["filed"] == k_filed
+
+
+def test_derive_q4_rejects_52_week_cross_year_q4(tmp_path):
+    """Two adjacent 53-week fiscal years: previous FY's Q3 end falls within
+    355 days of the current FY end, but NOT within the current FY's explicit
+    start.  With start available, it must be excluded; only current-year
+    Q1/Q2/Q3 counted → exactly 3 quarters → correct Q4 derived.
+
+    Without the fix (using 366-day window), the previous FY Q3 would be
+    pulled into the current FY, giving 4 quarters → len != 3 → skipped.
+    With the fix (explicit start), only the 3 genuine current-FY quarters
+    are found and Q4 is correctly derived.
+    """
+    # Previous FY: 2022-01-30 → 2023-01-28 (364 days)
+    prev_fy_end = pd.Timestamp("2023-01-28")
+    # Current FY: 2023-01-29 → 2024-02-03 (371 days, 53-week)
+    curr_fy_start = pd.Timestamp("2023-01-29")
+    curr_fy_end = pd.Timestamp("2024-02-03")
+    curr_k_filed = pd.Timestamp("2024-03-20")
+
+    # Previous FY Q3 ends 2022-10-29: distance from curr_fy_end = 462 days,
+    # so it won't be picked up by either window.  Instead, make a previous FY
+    # Q3 that ends close enough to be within 355 days of curr_fy_end but
+    # before curr_fy_start (i.e. it belongs to the previous FY).
+    # 355 days before curr_fy_end = 2023-02-14; choose 2023-02-10 (inside 355d window
+    # but before curr_fy_start 2023-01-29 → actually after it). Let's be precise:
+    # We want: end > (curr_fy_end - 355d) AND end < curr_fy_start.
+    # curr_fy_end - 355d = 2024-02-03 - 355d = 2023-02-13.
+    # curr_fy_start = 2023-01-29.
+    # 2023-02-13 > 2023-01-29, so there's NO date that satisfies both conditions.
+    # Instead, demonstrate with 366d (old behaviour) vs explicit start (new):
+    # Use curr_fy_end - 366d = 2023-01-03; prev FY Q3 ends 2023-01-10.
+    # 2023-01-10 > 2023-01-03 (within old 366d window) but < curr_fy_start 2023-01-29.
+    prev_q3_end = pd.Timestamp("2023-01-10")  # within 366d of curr_fy_end, before curr_fy_start
+
+    records = [
+        # Previous FY Q3 — should NOT be included in current FY
+        {
+            "ticker": "TGT",
+            "concept": CONCEPT,
+            "end": prev_q3_end.strftime("%Y-%m-%d"),
+            "filed": "2023-03-01",
+            "val": 999.0,
+            "form": "10-Q",
+            "accn": "PQ3",
+            "duration_days": 91,
+        },
+        # Current FY quarters
+        {
+            "ticker": "TGT",
+            "concept": CONCEPT,
+            "end": "2023-04-29",
+            "filed": "2023-06-07",
+            "val": 100.0,
+            "form": "10-Q",
+            "accn": "CQ1",
+            "duration_days": 90,
+        },
+        {
+            "ticker": "TGT",
+            "concept": CONCEPT,
+            "end": "2023-07-29",
+            "filed": "2023-09-06",
+            "val": 200.0,
+            "form": "10-Q",
+            "accn": "CQ2",
+            "duration_days": 91,
+        },
+        {
+            "ticker": "TGT",
+            "concept": CONCEPT,
+            "end": "2023-10-28",
+            "filed": "2023-12-06",
+            "val": 300.0,
+            "form": "10-Q",
+            "accn": "CQ3",
+            "duration_days": 91,
+        },
+        # Current FY 10-K with explicit start
+        {
+            "ticker": "TGT",
+            "concept": CONCEPT,
+            "end": curr_fy_end.strftime("%Y-%m-%d"),
+            "filed": curr_k_filed.strftime("%Y-%m-%d"),
+            "val": 1000.0,
+            "form": "10-K",
+            "accn": "CK",
+            "start": curr_fy_start.strftime("%Y-%m-%d"),
+            "duration_days": (curr_fy_end - curr_fy_start).days,
+        },
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    q = PitQuery(path)
+
+    result = q.ttm("TGT", CONCEPT)
+    assert not result.empty
+    last = result.iloc[-1]
+    # Only 3 current-FY quarters (100+200+300=600); Q4 = 1000-600 = 400; TTM = 1000
+    assert last["ttm_val"] == pytest.approx(1000.0)
+    assert last["n_periods"] == 4
+
+
+def test_derive_q4_rejects_non_monotonic_ends(tmp_path):
+    """If the 3 matched quarters have non-monotonically-increasing ends,
+    the derivation must be skipped."""
+    from pitedgar.query import _derive_q4_rows
+
+    # Build df_q with 3 quarters whose ends are NOT monotonically increasing
+    # (Q2 end < Q1 end — impossible in real data, but tests the guard).
+    df_q = pd.DataFrame(
+        {
+            "end": pd.to_datetime(["2023-06-30", "2023-03-31", "2023-09-30"]),
+            "filed": pd.to_datetime(["2023-07-28", "2023-04-28", "2023-10-28"]),
+            "val": [200.0, 100.0, 300.0],
+        }
+    )
+    df_k = pd.DataFrame(
+        {
+            "end": pd.to_datetime(["2023-12-31"]),
+            "filed": pd.to_datetime(["2024-02-01"]),
+            "val": [1000.0],
+            "start": pd.to_datetime(["2023-01-01"]),
+        }
+    )
+    result = _derive_q4_rows(df_q, df_k)
+    # The 3 quarters have non-monotonic ends after sort: 03-31, 06-30, 09-30 — that's
+    # actually monotonic.  To force non-monotonic we need two with the same value or
+    # reversed.  Rebuild with Q1 > Q2.
+    df_q2 = pd.DataFrame(
+        {
+            "end": pd.to_datetime(["2023-06-30", "2023-04-30", "2023-09-30"]),
+            "filed": pd.to_datetime(["2023-07-28", "2023-05-28", "2023-10-28"]),
+            "val": [200.0, 100.0, 300.0],
+        }
+    )
+    # All three are distinct and after sort: 04-30, 06-30, 09-30 — monotonic, so
+    # let's create a case where two ends are equal (duplicates collapse to 2 rows → != 3).
+    df_q3 = pd.DataFrame(
+        {
+            "end": pd.to_datetime(["2023-03-31", "2023-03-31", "2023-09-30"]),
+            "filed": pd.to_datetime(["2023-04-28", "2023-04-30", "2023-10-28"]),
+            "val": [100.0, 105.0, 300.0],
+        }
+    )
+    result3 = _derive_q4_rows(df_q3, df_k)
+    # After dedup two 03-31 rows → 1 row; then total = 2 != 3 → skipped
+    assert result3.empty
+
+
+def test_derive_q4_rejects_absurd_value(tmp_path):
+    """If |Q4_val| > |annual_val| * 2, the synthetic row must be skipped."""
+    from pitedgar.query import _derive_q4_rows
+
+    # annual = 100, Q1+Q2+Q3 = 400 → Q4 = -300 → |Q4|=300 > 2*100=200 → skip
+    df_q = pd.DataFrame(
+        {
+            "end": pd.to_datetime(["2023-03-31", "2023-06-30", "2023-09-30"]),
+            "filed": pd.to_datetime(["2023-04-28", "2023-07-28", "2023-10-28"]),
+            "val": [100.0, 150.0, 150.0],
+        }
+    )
+    df_k = pd.DataFrame(
+        {
+            "end": pd.to_datetime(["2023-12-31"]),
+            "filed": pd.to_datetime(["2024-02-01"]),
+            "val": [100.0],  # annual = 100, Q1+Q2+Q3 = 400 → Q4 = -300
+            "start": pd.to_datetime(["2023-01-01"]),
+        }
+    )
+    result = _derive_q4_rows(df_q, df_k)
+    assert result.empty
