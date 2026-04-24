@@ -1627,3 +1627,116 @@ def test_parse_company_share_concept_uses_shares_units_regression(facts_dir):
     df = parse_company("0000320193", ["us-gaap:EarningsPerShareBasic"], facts_dir, ["10-K"])
     assert len(df) == 1
     assert df.iloc[0]["val"] == pytest.approx(5.5)
+
+
+# ---------------------------------------------------------------------------
+# Worker error isolation tests (issue #33)
+# ---------------------------------------------------------------------------
+
+def _make_single_company_facts(facts_dir, cik="0000000200", val=1_000_000_000):
+    """Write a minimal facts file for one company and return a cik_map."""
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "Revenues": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": val,
+                                "form": "10-K",
+                                "accn": "W1",
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    (facts_dir / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+    return cik
+
+
+@pytest.mark.parametrize("n_workers", [1, 2])
+def test_parse_all_worker_error_tolerant(tmp_path, n_workers):
+    """strict=False: one failing ticker must not discard successful results."""
+    facts_dir = tmp_path / "companyfacts"
+    facts_dir.mkdir()
+
+    # Two good companies + one bad one built into cik_map
+    good_cik_1 = "0000000201"
+    good_cik_2 = "0000000202"
+    bad_cik = "0000000203"
+
+    for cik, val in [(good_cik_1, 100_000_000), (good_cik_2, 200_000_000)]:
+        _make_single_company_facts(facts_dir, cik=cik, val=val)
+    # bad ticker has no JSON file, but we will make parse_company raise for it via monkeypatch
+
+    cik_map = pd.DataFrame(
+        {"cik": [good_cik_1, good_cik_2, bad_cik]},
+        index=pd.Index(["GOOD1", "GOOD2", "BAD"], name="ticker"),
+    )
+
+    config = PitEdgarConfig(
+        edgar_identity="Test test@example.com",
+        data_dir=tmp_path,
+        facts_dir=facts_dir,
+    )
+
+    import pitedgar.parser as parser_mod
+
+    original_parse_company = parser_mod.parse_company
+
+    def failing_parse_company(cik_padded, concepts, facts_dir, forms, **_kwargs):
+        if cik_padded == bad_cik:
+            raise RuntimeError("Simulated worker failure")
+        return original_parse_company(cik_padded, concepts, facts_dir, forms)
+
+    from unittest.mock import patch
+
+    with patch.object(parser_mod, "parse_company", side_effect=failing_parse_company):
+        master = parse_all(config, cik_map, strict=False, n_workers=n_workers)
+
+    # Both good companies should be present; BAD should be absent.
+    assert set(master["ticker"]) == {"GOOD1", "GOOD2"}
+    assert "BAD" not in set(master["ticker"])
+
+
+@pytest.mark.parametrize("n_workers", [1, 2])
+def test_parse_all_worker_error_strict_raises(tmp_path, n_workers):
+    """strict=True: any worker failure must raise RuntimeError mentioning failure count."""
+    facts_dir = tmp_path / "companyfacts"
+    facts_dir.mkdir()
+
+    good_cik = "0000000301"
+    bad_cik = "0000000302"
+
+    _make_single_company_facts(facts_dir, cik=good_cik, val=500_000_000)
+
+    cik_map = pd.DataFrame(
+        {"cik": [good_cik, bad_cik]},
+        index=pd.Index(["GOOD", "BAD"], name="ticker"),
+    )
+
+    config = PitEdgarConfig(
+        edgar_identity="Test test@example.com",
+        data_dir=tmp_path,
+        facts_dir=facts_dir,
+    )
+
+    import pitedgar.parser as parser_mod
+
+    original_parse_company = parser_mod.parse_company
+
+    def failing_parse_company(cik_padded, concepts, facts_dir, forms, **_kwargs):
+        if cik_padded == bad_cik:
+            raise RuntimeError("Simulated worker failure")
+        return original_parse_company(cik_padded, concepts, facts_dir, forms)
+
+    from unittest.mock import patch
+
+    with patch.object(parser_mod, "parse_company", side_effect=failing_parse_company):
+        with pytest.raises(RuntimeError, match="1 workers failed"):
+            parse_all(config, cik_map, strict=True, n_workers=n_workers)

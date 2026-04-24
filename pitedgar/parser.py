@@ -301,8 +301,14 @@ def parse_all(
     cik_map: pd.DataFrame,
     force: bool = False,
     n_workers: int | None = None,
+    strict: bool = False,
 ) -> pd.DataFrame:
-    """Parse all companies in cik_map into a single PIT master parquet."""
+    """Parse all companies in cik_map into a single PIT master parquet.
+
+    strict: when False (default), worker exceptions are logged and skipped so
+    successful workers' results are preserved. When True, raises RuntimeError
+    after all workers complete if any failed.
+    """
     config.ensure_dirs()
     out_path = config.data_dir / "pit_financials.parquet"
 
@@ -320,20 +326,26 @@ def parse_all(
     )
 
     all_frames: list[pd.DataFrame] = []
+    errors: list[tuple[str, BaseException]] = []
 
     if n_workers == 1:
         for ticker, row in tqdm(cik_map.iterrows(), total=len(cik_map), desc="Parsing"):
             cik_padded = str(row["cik"])
-            df = parse_company(
-                cik_padded=cik_padded,
-                concepts=config.concepts,
-                facts_dir=config.facts_dir,
-                forms=config.forms,
-                scale_correction=config.scale_correction,
-                scale_correction_threshold=config.scale_correction_threshold,
-                alias_map=CONCEPT_ALIASES,
-                lossy_alias_map=effective_lossy_map,
-            )
+            try:
+                df = parse_company(
+                    cik_padded=cik_padded,
+                    concepts=config.concepts,
+                    facts_dir=config.facts_dir,
+                    forms=config.forms,
+                    scale_correction=config.scale_correction,
+                    scale_correction_threshold=config.scale_correction_threshold,
+                    alias_map=CONCEPT_ALIASES,
+                    lossy_alias_map=effective_lossy_map,
+                )
+            except BaseException as exc:
+                logger.error(f"Worker failed for ticker {ticker!r}: {exc!r}")
+                errors.append((str(ticker), exc))
+                continue
             if df.empty:
                 continue
             df.insert(0, "ticker", str(ticker))
@@ -358,11 +370,21 @@ def parse_all(
             for future in tqdm(
                 as_completed(futures), total=len(futures), desc=f"Parsing ({n_workers} workers)"
             ):
-                ticker, df = future.result()
+                try:
+                    ticker, df = future.result()
+                except BaseException as exc:
+                    logger.error(f"Worker failed: {exc!r}")
+                    errors.append(("<unknown>", exc))
+                    continue
                 if df.empty:
                     continue
                 df.insert(0, "ticker", ticker)
                 all_frames.append(df)
+
+    if errors:
+        if strict:
+            raise RuntimeError(f"{len(errors)} workers failed; first: {errors[0][1]!r}") from errors[0][1]
+        logger.warning(f"{len(errors)} workers failed (strict=False); continuing with partial results.")
 
     if not all_frames:
         logger.warning("No data parsed — check facts_dir and CIK map.")
