@@ -73,6 +73,8 @@ def parse_company(
     concepts: list[str] | None,
     facts_dir: Path,
     forms: list[str],
+    scale_correction: str = "off",
+    scale_correction_threshold: float = 1_000_000.0,
 ) -> pd.DataFrame:
     """Parse a single company's JSON into a tidy PIT DataFrame.
 
@@ -84,6 +86,13 @@ def parse_company(
                     quant signal iteration without re-parsing the 1.5 GB cache).
         facts_dir:  directory containing CIK*.json files.
         forms:      filing forms to keep, e.g. ["10-K", "10-Q"].
+        scale_correction: one of "off", "auto", or "force".
+            "off"  — never apply 1000x correction (default).
+            "auto" — apply correction only when ≥2 distinct USD concepts are ALL
+                     below ``scale_correction_threshold``; emits a warning.
+            "force"— always multiply USD values ×1000, no threshold check.
+        scale_correction_threshold: max absolute USD value below which the
+            ``auto`` heuristic considers a concept under-scaled (default $1M).
 
     Returns:
         DataFrame with columns: cik, concept, end, filed, val, form, accn.
@@ -223,16 +232,42 @@ def parse_company(
     df["filed"] = pd.to_datetime(df["filed"], errors="coerce")
     df = df.dropna(subset=["end", "filed"])
 
-    # Scale detection: some filers report USD values in thousands instead of dollars.
-    # If the maximum absolute USD value across all USD concepts is < $1M, the company
-    # is almost certainly mis-scaled — rescale by 1000 and flag the affected rows in
-    # `scale_corrected` so downstream consumers can audit which values were adjusted.
+    # Scale correction: some filers report USD values in thousands instead of dollars.
+    # Controlled by the ``scale_correction`` parameter:
+    #   "off"   — never apply (default; protects legitimate micro/nano-caps).
+    #   "auto"  — apply only when ≥2 distinct USD concepts are ALL below the
+    #             threshold; emits a visible warning so users can audit it.
+    #   "force" — always multiply regardless of threshold (known-thousands filers).
     df["scale_corrected"] = False
     usd_mask = ~df["concept"].str.split(":").str[-1].isin(_SHARE_CONCEPTS)
-    if usd_mask.any() and df.loc[usd_mask, "val"].abs().max() < 1_000_000:
-        df.loc[usd_mask, "val"] *= 1000
-        df.loc[usd_mask, "scale_corrected"] = True
-        logger.debug(f"CIK {cik_padded}: applied 1000x scale correction to {int(usd_mask.sum())} USD rows")
+
+    if scale_correction == "force":
+        if usd_mask.any():
+            df.loc[usd_mask, "val"] *= 1000
+            df.loc[usd_mask, "scale_corrected"] = True
+            logger.debug(
+                f"CIK {cik_padded}: force scale correction applied to {int(usd_mask.sum())} USD rows"
+            )
+    elif scale_correction == "auto":
+        if usd_mask.any():
+            usd_df = df.loc[usd_mask]
+            # Require at least TWO distinct USD concepts below the threshold before
+            # firing — a single small value is insufficient evidence.
+            concepts_below = (
+                usd_df.groupby("concept")["val"]
+                .apply(lambda s: s.abs().max() < scale_correction_threshold)
+            )
+            n_below = int(concepts_below.sum())
+            if n_below >= 2:
+                max_val = usd_df["val"].abs().max()
+                df.loc[usd_mask, "val"] *= 1000
+                df.loc[usd_mask, "scale_corrected"] = True
+                logger.warning(
+                    f"CIK {cik_padded}: auto scale correction applied "
+                    f"({n_below} USD concepts below threshold; "
+                    f"max_val={max_val:.2f}, threshold={scale_correction_threshold:.0f})"
+                )
+    # scale_correction == "off": do nothing
 
     # Duration in days; -1 if start missing (instantaneous entries, e.g. balance sheet).
     df["duration_days"] = (df["end"] - df["start"]).dt.days.where(df["start"].notna(), -1)
@@ -261,22 +296,25 @@ def parse_company(
 
 
 def _parse_one_for_pool(
-    args: tuple[str, str, list[str] | None, Path, list[str]],
+    args: tuple[str, str, list[str] | None, Path, list[str], str, float],
 ) -> tuple[str, pd.DataFrame]:
     """Top-level helper for ProcessPoolExecutor (must be picklable, hence not a closure).
 
     Args:
-        args: tuple of (ticker, cik_padded, concepts, facts_dir, forms).
+        args: tuple of (ticker, cik_padded, concepts, facts_dir, forms,
+              scale_correction, scale_correction_threshold).
 
     Returns:
         (ticker, parsed DataFrame). DataFrame may be empty.
     """
-    ticker, cik_padded, concepts, facts_dir, forms = args
+    ticker, cik_padded, concepts, facts_dir, forms, scale_correction, scale_correction_threshold = args
     df = parse_company(
         cik_padded=cik_padded,
         concepts=concepts,
         facts_dir=facts_dir,
         forms=forms,
+        scale_correction=scale_correction,
+        scale_correction_threshold=scale_correction_threshold,
     )
     return ticker, df
 
@@ -324,6 +362,8 @@ def parse_all(
                 concepts=config.concepts,
                 facts_dir=config.facts_dir,
                 forms=config.forms,
+                scale_correction=config.scale_correction,
+                scale_correction_threshold=config.scale_correction_threshold,
             )
             if df.empty:
                 continue
@@ -332,7 +372,15 @@ def parse_all(
     else:
         # Parallel path: fan out across processes — JSON parsing is CPU-bound.
         tasks = [
-            (str(ticker), str(row["cik"]), config.concepts, config.facts_dir, config.forms)
+            (
+                str(ticker),
+                str(row["cik"]),
+                config.concepts,
+                config.facts_dir,
+                config.forms,
+                config.scale_correction,
+                config.scale_correction_threshold,
+            )
             for ticker, row in cik_map.iterrows()
         ]
         with ProcessPoolExecutor(max_workers=n_workers) as pool:

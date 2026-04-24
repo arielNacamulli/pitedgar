@@ -153,14 +153,15 @@ def test_parse_company_concept_alias(tmp_path):
 
 
 def test_parse_company_scale_correction(tmp_path):
-    """Filers that report USD values in thousands (max < $1M) are auto-corrected by 1000x."""
+    """Filers that report USD values in thousands (max < $1M) are auto-corrected by 1000x
+    when scale_correction='auto' and at least 2 distinct USD concepts are below threshold."""
     facts = {
         "facts": {
             "us-gaap": {
                 "Revenues": {
                     "units": {
                         "USD": [
-                            # Values in thousands: 500_000 = $500M reported as $500
+                            # Values in thousands: 500 reported → $500k after correction
                             {
                                 "start": "2022-01-01",
                                 "end": "2022-12-31",
@@ -171,14 +172,35 @@ def test_parse_company_scale_correction(tmp_path):
                             },
                         ]
                     }
-                }
+                },
+                # Second USD concept below threshold — required for auto heuristic to fire.
+                "Assets": {
+                    "units": {
+                        "USD": [
+                            {
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 800,
+                                "form": "10-K",
+                                "accn": "S1A",
+                            },
+                        ]
+                    }
+                },
             }
         }
     }
     cik = "0000000002"
     (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
-    df = parse_company(cik, ["us-gaap:Revenues"], tmp_path, ["10-K"])
-    assert df.iloc[0]["val"] == pytest.approx(500_000)
+    df = parse_company(
+        cik,
+        ["us-gaap:Revenues", "us-gaap:Assets"],
+        tmp_path,
+        ["10-K"],
+        scale_correction="auto",
+    )
+    rev_row = df[df["concept"] == "us-gaap:Revenues"].iloc[0]
+    assert rev_row["val"] == pytest.approx(500_000)
 
 
 def test_parse_company_scale_correct_does_not_affect_shares(tmp_path):
@@ -1042,6 +1064,204 @@ def test_parse_all_invalid_n_workers(tmp_path):
         parse_all(config, cik_map, n_workers=0)
 
 
+# ---------------------------------------------------------------------------
+# Scale correction mode tests (Issue #12)
+# ---------------------------------------------------------------------------
+
+def _microcap_facts_single_concept():
+    """A micro-cap filer with $500k revenue — one USD concept below $1M threshold."""
+    return {
+        "facts": {
+            "us-gaap": {
+                "Revenues": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 500_000,
+                                "form": "10-K",
+                                "accn": "MC1",
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+    }
+
+
+def _microcap_facts_two_concepts():
+    """A micro-cap filer with 2 USD concepts both below $1M threshold."""
+    return {
+        "facts": {
+            "us-gaap": {
+                "Revenues": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 500_000,
+                                "form": "10-K",
+                                "accn": "MC2",
+                            },
+                        ]
+                    }
+                },
+                "Assets": {
+                    "units": {
+                        "USD": [
+                            {
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 750_000,
+                                "form": "10-K",
+                                "accn": "MC3",
+                            },
+                        ]
+                    }
+                },
+            }
+        }
+    }
+
+
+def test_microcap_not_corrected_by_default(tmp_path):
+    """Micro-cap with $500k revenue must NOT be corrected when scale_correction='off'
+    (the default), protecting legitimate small companies from silent corruption."""
+    cik = "0000111001"
+    (tmp_path / f"CIK{cik}.json").write_text(
+        json.dumps(_microcap_facts_single_concept()), encoding="utf-8"
+    )
+    df = parse_company(cik, ["us-gaap:Revenues"], tmp_path, ["10-K"])
+    # Default is "off" — value must be untouched.
+    assert df.iloc[0]["val"] == pytest.approx(500_000)
+    assert not df.iloc[0]["scale_corrected"]
+
+
+def test_microcap_auto_single_concept_not_corrected(tmp_path):
+    """With scale_correction='auto', a micro-cap with only ONE USD concept below
+    the threshold must NOT be corrected — the heuristic requires at least two."""
+    cik = "0000111002"
+    (tmp_path / f"CIK{cik}.json").write_text(
+        json.dumps(_microcap_facts_single_concept()), encoding="utf-8"
+    )
+    df = parse_company(
+        cik, ["us-gaap:Revenues"], tmp_path, ["10-K"], scale_correction="auto"
+    )
+    assert df.iloc[0]["val"] == pytest.approx(500_000)
+    assert not df.iloc[0]["scale_corrected"]
+
+
+def test_auto_two_concepts_below_threshold_corrects_and_warns(tmp_path, capsys):
+    """With scale_correction='auto' AND 2+ concepts below threshold, correction fires
+    and a visible warning is emitted (not just a debug message)."""
+    from loguru import logger
+
+    cik = "0000111003"
+    (tmp_path / f"CIK{cik}.json").write_text(
+        json.dumps(_microcap_facts_two_concepts()), encoding="utf-8"
+    )
+
+    # Capture loguru output by adding a temporary sink.
+    warning_messages: list[str] = []
+
+    def _sink(message):
+        if message.record["level"].no >= 30:  # WARNING = 30
+            warning_messages.append(str(message))
+
+    sink_id = logger.add(_sink, level="WARNING")
+    try:
+        df = parse_company(
+            cik,
+            ["us-gaap:Revenues", "us-gaap:Assets"],
+            tmp_path,
+            ["10-K"],
+            scale_correction="auto",
+        )
+    finally:
+        logger.remove(sink_id)
+
+    rev_row = df[df["concept"] == "us-gaap:Revenues"].iloc[0]
+    assert rev_row["val"] == pytest.approx(500_000 * 1000)
+    assert rev_row["scale_corrected"]
+    # A WARNING-level log entry must mention the CIK.
+    assert any(cik in msg for msg in warning_messages), (
+        f"Expected a WARNING mentioning CIK {cik}; got: {warning_messages}"
+    )
+
+
+def test_scale_correction_force_always_multiplies(tmp_path):
+    """With scale_correction='force', USD values are always multiplied ×1000
+    regardless of their magnitude."""
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "Revenues": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 5_000_000,  # already well above $1M threshold
+                                "form": "10-K",
+                                "accn": "F1",
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    cik = "0000111004"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+    df = parse_company(
+        cik, ["us-gaap:Revenues"], tmp_path, ["10-K"], scale_correction="force"
+    )
+    assert df.iloc[0]["val"] == pytest.approx(5_000_000 * 1000)
+    assert df.iloc[0]["scale_corrected"]
+
+
+def test_scale_correction_off_never_multiplies(tmp_path):
+    """With scale_correction='off', values are never multiplied even if they look
+    like thousands-reporting (only 1 concept, tiny value)."""
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "Revenues": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 250,
+                                "form": "10-K",
+                                "accn": "O1",
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    cik = "0000111005"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+    df = parse_company(
+        cik, ["us-gaap:Revenues"], tmp_path, ["10-K"], scale_correction="off"
+    )
+    assert df.iloc[0]["val"] == pytest.approx(250)
+    assert not df.iloc[0]["scale_corrected"]
+
+
+# ---------------------------------------------------------------------------
+# Alias priority tests (issue #25)
+# ---------------------------------------------------------------------------
+
 def test_alias_precedence_follows_priority_list_order(tmp_path):
     """When two aliases collide on (end, filed, form), the alias listed earlier in
     CONCEPT_ALIAS_PRIORITY wins — independent of dict insertion order."""
@@ -1088,7 +1308,7 @@ def test_alias_precedence_follows_priority_list_order(tmp_path):
 
 
 def test_reversing_priority_changes_winner(tmp_path, monkeypatch):
-    """Monkeypatching CONCEPT_ALIAS_PRIORITY to reverse the order must flip the winner."""
+    """Monkeypatching CONCEPT_ALIAS_PRIORITY to reverse order must flip the winner."""
     import pitedgar.config as config_mod
     import pitedgar.parser as parser_mod
 
@@ -1186,14 +1406,13 @@ def test_is_scale_corrected_exported_from_package():
     assert hasattr(pitedgar, "is_scale_corrected")
     assert pitedgar.is_scale_corrected is from_parser
 
+
 # ---------------------------------------------------------------------------
 # Float-tolerance dedup tests (issue #15)
 # ---------------------------------------------------------------------------
 
-
 def test_dedup_tolerates_float_representation_drift(tmp_path):
-    """Revenue $1B serialized as 1000000000.0 in original filing and 1.0e9 in the
-    comparative re-filing must be treated as identical → only the first row kept."""
+    """Same revenue $1B serialized with float drift must dedupe."""
     facts = {
         "facts": {
             "us-gaap": {
@@ -1204,18 +1423,17 @@ def test_dedup_tolerates_float_representation_drift(tmp_path):
                                 "start": "2022-01-01",
                                 "end": "2022-12-31",
                                 "filed": "2023-02-01",
-                                "val": 1000000000.0,
+                                "val": 1_000_000_000.0,
                                 "form": "10-K",
-                                "accn": "FD1",
+                                "accn": "F1",
                             },
-                            # Same value, different float representation (1-ULP drift).
                             {
                                 "start": "2022-01-01",
                                 "end": "2022-12-31",
                                 "filed": "2024-02-01",
-                                "val": 1000000000.0000002,
+                                "val": 1_000_000_000.0 + 1e-7,
                                 "form": "10-K",
-                                "accn": "FD2",
+                                "accn": "F2",
                             },
                         ]
                     }
@@ -1227,12 +1445,11 @@ def test_dedup_tolerates_float_representation_drift(tmp_path):
     (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
     df = parse_company(cik, ["us-gaap:Revenues"], tmp_path, ["10-K"])
     assert len(df) == 1
-    assert df.iloc[0]["accn"] == "FD1"
+    assert df.iloc[0]["accn"] == "F1"
 
 
 def test_dedup_preserves_cent_level_restatement(tmp_path):
-    """Revenue restated by $1 (one dollar on a $1B base) must NOT be dropped —
-    $0.005 < $1 so the change clears the half-cent absolute tolerance."""
+    """Revenue $1B restated by exactly $1 (well above 0.005 USD atol) must produce 2 rows."""
     facts = {
         "facts": {
             "us-gaap": {
@@ -1269,7 +1486,7 @@ def test_dedup_preserves_cent_level_restatement(tmp_path):
 
 
 def test_dedup_preserves_small_restatement_proportional(tmp_path):
-    """Revenue $1B restated to $1.01B (1 % change) must produce 2 rows."""
+    """Revenue $1B restated to $1.01B (1% change) must produce 2 rows."""
     facts = {
         "facts": {
             "us-gaap": {
@@ -1306,8 +1523,7 @@ def test_dedup_preserves_small_restatement_proportional(tmp_path):
 
 
 def test_dedup_share_concept_tolerates_float_drift(tmp_path):
-    """EPS 5.50 filed originally and 5.499999999 as a comparative re-filing must
-    be treated as identical under the tight share-concept tolerance (1e-6)."""
+    """EPS 5.50 and 5.499999999 must dedupe under tight share tolerance."""
     facts = {
         "facts": {
             "us-gaap": {
@@ -1341,4 +1557,3 @@ def test_dedup_share_concept_tolerates_float_drift(tmp_path):
     df = parse_company(cik, ["us-gaap:EarningsPerShareBasic"], tmp_path, ["10-K"])
     assert len(df) == 1
     assert df.iloc[0]["accn"] == "EP1"
-

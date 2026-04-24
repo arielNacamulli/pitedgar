@@ -1,6 +1,7 @@
 """Configuration for pitedgar via Pydantic BaseModel."""
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, model_validator
 
@@ -95,6 +96,16 @@ class PitEdgarConfig(BaseModel):
     # explicit list (e.g. ``DEFAULT_CONCEPTS``) to opt back into the curated subset.
     concepts: list[str] | None = None
     forms: list[str] = DEFAULT_FORMS
+    # Scale correction controls whether USD values are multiplied ×1000 when they
+    # appear to have been reported in thousands instead of dollars.
+    #
+    # "off"   — never apply any correction (default; protects legitimate micro/nano-caps).
+    # "auto"  — apply 1000x correction only when at least TWO distinct USD concepts
+    #           are ALL below ``scale_correction_threshold``; emits a warning.
+    # "force" — always multiply USD values ×1000 regardless of threshold (use for
+    #           filers known a priori to report in thousands).
+    scale_correction: Literal["off", "auto", "force"] = "off"
+    scale_correction_threshold: float = 1_000_000.0
 
     model_config = {"arbitrary_types_allowed": True}
 
