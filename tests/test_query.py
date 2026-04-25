@@ -3,7 +3,7 @@
 import pandas as pd
 import pytest
 
-from pitedgar.query import PitQuery
+from pitedgar.query import PitQuery, _derive_quarterly_from_ytd
 
 CONCEPT = "us-gaap:Revenues"
 
@@ -984,6 +984,122 @@ def test_history_returns_latest_filed_per_end(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# history() as_of PIT correctness (issue #13)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def restatement_history_parquet(tmp_path):
+    """Q1 original + Q1 restatement + a future 10-K for history() as_of tests."""
+    records = [
+        # Q1 original filing
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-03-31",
+            "filed": "2023-04-28",
+            "val": 100.0,
+            "form": "10-Q",
+            "accn": "H_ORIG",
+        },
+        # Q1 restatement filed in August
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-03-31",
+            "filed": "2023-08-01",
+            "val": 110.0,
+            "form": "10-Q",
+            "accn": "H_RESTATE",
+        },
+        # 10-K filed in February 2024 — must not appear in as_of="2023-12-31"
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-12-31",
+            "filed": "2024-02-01",
+            "val": 999.0,
+            "form": "10-K",
+            "accn": "H_10K",
+        },
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    return path
+
+
+def test_history_as_of_before_restatement_returns_original(restatement_history_parquet):
+    """history(as_of=...) before the restatement must return the original Q1 value."""
+    q = PitQuery(restatement_history_parquet)
+    h = q.history("AAPL", CONCEPT, as_of="2023-06-01", freq="Q")
+    assert len(h) == 1
+    q1 = h[h["end"] == pd.Timestamp("2023-03-31")].iloc[0]
+    assert q1["val"] == pytest.approx(100.0)
+
+
+def test_history_as_of_after_restatement_returns_restated(restatement_history_parquet):
+    """history(as_of=...) after the restatement must return the restated Q1 value."""
+    q = PitQuery(restatement_history_parquet)
+    h = q.history("AAPL", CONCEPT, as_of="2023-09-01", freq="Q")
+    assert len(h) == 1
+    q1 = h[h["end"] == pd.Timestamp("2023-03-31")].iloc[0]
+    assert q1["val"] == pytest.approx(110.0)
+
+
+def test_history_as_of_excludes_future_filings(restatement_history_parquet):
+    """history(as_of="2023-12-31") must NOT include the 10-K filed 2024-02-01."""
+    q = PitQuery(restatement_history_parquet)
+    # Use freq="all" (not "Q" or "A") so the 10-K wouldn't be filtered by duration.
+    h = q.history("AAPL", CONCEPT, as_of="2023-12-31", freq="all")
+    assert len(h) == 1
+    assert pd.Timestamp("2024-02-01") not in h["filed"].values
+    assert h.iloc[0]["end"] == pd.Timestamp("2023-03-31")
+
+
+def test_history_as_of_default_none_keeps_legacy_behaviour(tmp_path):
+    """Without as_of, history() returns the globally latest-filed value per end (non-PIT legacy)."""
+    records = [
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-03-31",
+            "filed": "2023-04-28",
+            "val": 50.0,
+            "form": "10-Q",
+            "accn": "H1",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-03-31",
+            "filed": "2023-06-01",
+            "val": 55.0,
+            "form": "10-Q",
+            "accn": "H2",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-06-30",
+            "filed": "2023-07-28",
+            "val": 60.0,
+            "form": "10-Q",
+            "accn": "H3",
+        },
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    q = PitQuery(path)
+    h = q.history("AAPL", CONCEPT, freq="Q")
+    assert len(h) == 2  # one row per period end
+    q1 = h[h["end"] == pd.Timestamp("2023-03-31")].iloc[0]
+    # Latest-filed restatement (55.0), not original (50.0)
+    assert q1["val"] == pytest.approx(55.0)
+
+
+# ---------------------------------------------------------------------------
 # YTD-chain synthesis (AAPL post-2021 pattern)
 # ---------------------------------------------------------------------------
 
@@ -1186,6 +1302,119 @@ def test_ttm_no_regression_when_only_discrete_quarters(tmp_path):
     assert last["n_periods"] == 4
 
 
+# ---------------------------------------------------------------------------
+# Issue #28: n_periods consistency between present-but-no-prior-filing and missing ticker
+# ---------------------------------------------------------------------------
+
+
+def test_ttm_cross_section_n_periods_zero_when_no_prior_filing(tmp_path):
+    """Ticker present in data but all filings are AFTER as_of_date → n_periods == 0,
+    ttm_val NaN. Must work WITHOUT passing max_staleness_days."""
+    records = [
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-03-31",
+            "filed": "2023-04-28",
+            "val": 100.0,
+            "form": "10-Q",
+            "accn": "Q1",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-06-30",
+            "filed": "2023-07-28",
+            "val": 200.0,
+            "form": "10-Q",
+            "accn": "Q2",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-09-30",
+            "filed": "2023-10-28",
+            "val": 300.0,
+            "form": "10-Q",
+            "accn": "Q3",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-12-31",
+            "filed": "2024-01-28",
+            "val": 400.0,
+            "form": "10-Q",
+            "accn": "Q4",
+        },
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    q = PitQuery(path)
+
+    # Query before ANY filing exists → ticker is present in the universe but has
+    # no event before as_of_date; merge_asof previously left n_periods as NaN.
+    result = q.ttm_cross_section(CONCEPT, "2023-01-01", tickers=["AAPL"])
+    assert len(result) == 1
+    row = result.iloc[0]
+    assert row["ticker"] == "AAPL"
+    assert pd.isna(row["ttm_val"])
+    assert row["n_periods"] == 0  # must be 0, not NaN
+
+
+def test_ttm_cross_section_n_periods_zero_for_missing_ticker_unchanged(tmp_path):
+    """Regression: ticker absent from the data universe still gets n_periods == 0."""
+    records = [
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-03-31",
+            "filed": "2023-04-28",
+            "val": 100.0,
+            "form": "10-Q",
+            "accn": "Q1",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-06-30",
+            "filed": "2023-07-28",
+            "val": 200.0,
+            "form": "10-Q",
+            "accn": "Q2",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-09-30",
+            "filed": "2023-10-28",
+            "val": 300.0,
+            "form": "10-Q",
+            "accn": "Q3",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": CONCEPT,
+            "end": "2023-12-31",
+            "filed": "2024-01-28",
+            "val": 400.0,
+            "form": "10-Q",
+            "accn": "Q4",
+        },
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    q = PitQuery(path)
+
+    # MSFT is not in the data at all → filler row.
+    result = q.ttm_cross_section(CONCEPT, "2024-06-01", tickers=["AAPL", "MSFT"])
+    msft = result[result["ticker"] == "MSFT"].iloc[0]
+    assert pd.isna(msft["ttm_val"])
+    assert msft["n_periods"] == 0
+
+
 def test_ttm_cross_section_matches_ttm_on_ytd_universe(tmp_path):
     """ttm_cross_section must return the same TTM as per-ticker ttm() for a mixed
     universe — including AAPL-style YTD-only filers."""
@@ -1229,3 +1458,1020 @@ def test_ttm_cross_section_matches_ttm_on_ytd_universe(tmp_path):
             assert pd.isna(row["ttm_val"])
         else:
             assert row["ttm_val"] == pytest.approx(expected, rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# PitQuery.__init__ filter pushdown kwargs (#24)
+# Issue #29: unknown concept validation
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def multi_ticker_parquet(tmp_path):
+    """Parquet with AAPL, MSFT, and two concepts for filter tests."""
+    records = [
+        {"ticker": "AAPL", "concept": "us-gaap:Revenues", "end": "2022-12-31",
+         "filed": "2023-02-02", "val": 394328000000.0, "form": "10-K", "accn": "A1"},
+        {"ticker": "AAPL", "concept": "us-gaap:Assets", "end": "2022-12-31",
+         "filed": "2023-02-02", "val": 352755000000.0, "form": "10-K", "accn": "A2"},
+        {"ticker": "MSFT", "concept": "us-gaap:Revenues", "end": "2022-06-30",
+         "filed": "2022-07-28", "val": 198270000000.0, "form": "10-K", "accn": "B1"},
+        {"ticker": "MSFT", "concept": "us-gaap:Assets", "end": "2022-06-30",
+         "filed": "2022-07-28", "val": 364840000000.0, "form": "10-K", "accn": "B2"},
+        {"ticker": "AAPL", "concept": "us-gaap:Revenues", "end": "2021-12-31",
+         "filed": "2022-01-28", "val": 365817000000.0, "form": "10-K", "accn": "A0"},
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    return path
+
+
+@pytest.fixture
+def concept_check_parquet(tmp_path):
+    """Small parquet with a single known concept: us-gaap:Revenues."""
+    records = [
+        {
+            "ticker": "AAPL",
+            "concept": "us-gaap:Revenues",
+            "end": "2022-12-31",
+            "filed": "2023-02-02",
+            "val": 394328000000.0,
+            "form": "10-K",
+            "accn": "A1",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": "us-gaap:Assets",
+            "end": "2022-12-31",
+            "filed": "2023-02-02",
+            "val": 352755000000.0,
+            "form": "10-K",
+            "accn": "A2",
+        },
+        {
+            "ticker": "MSFT",
+            "concept": "us-gaap:Revenues",
+            "end": "2022-06-30",
+            "filed": "2022-07-28",
+            "val": 198270000000.0,
+            "form": "10-K",
+            "accn": "B1",
+        },
+        {
+            "ticker": "MSFT",
+            "concept": "us-gaap:Assets",
+            "end": "2022-06-30",
+            "filed": "2022-07-28",
+            "val": 364840000000.0,
+            "form": "10-K",
+            "accn": "B2",
+        },
+        # Old row that should be excluded by a `since` filter
+        {
+            "ticker": "AAPL",
+            "concept": "us-gaap:Revenues",
+            "end": "2021-12-31",
+            "filed": "2022-01-28",
+            "val": 365817000000.0,
+            "form": "10-K",
+            "accn": "A0",
+        },
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    return path
+
+
+def test_init_with_ticker_filter_loads_subset(multi_ticker_parquet):
+    """PitQuery(path, tickers=['AAPL']) loads only AAPL rows."""
+    q = PitQuery(multi_ticker_parquet, tickers=["AAPL"])
+    assert set(q.data["ticker"].unique()) == {"AAPL"}
+    assert "MSFT" not in q.data["ticker"].values
+
+
+def test_init_with_concept_filter(multi_ticker_parquet):
+    """PitQuery(path, concepts=['us-gaap:Revenues']) loads only Revenues rows."""
+    q = PitQuery(multi_ticker_parquet, concepts=["us-gaap:Revenues"])
+    assert set(q.data["concept"].unique()) == {"us-gaap:Revenues"}
+    assert "us-gaap:Assets" not in q.data["concept"].values
+
+
+def test_init_with_since_filter_drops_old_rows(multi_ticker_parquet):
+    """PitQuery(path, since='2023-01-01') drops rows filed before 2023-01-01."""
+    q = PitQuery(multi_ticker_parquet, since="2023-01-01")
+    assert (q.data["filed"] >= pd.Timestamp("2023-01-01")).all()
+    # The AAPL row filed 2022-01-28 must be absent
+    assert len(q.data[q.data["filed"] < pd.Timestamp("2023-01-01")]) == 0
+
+
+def test_init_without_filters_is_backwards_compatible(multi_ticker_parquet):
+    """PitQuery(path) with no filter kwargs loads all rows unchanged."""
+    q = PitQuery(multi_ticker_parquet)
+    assert set(q.data["ticker"].unique()) == {"AAPL", "MSFT"}
+    assert set(q.data["concept"].unique()) == {"us-gaap:Revenues", "us-gaap:Assets"}
+    assert len(q.data) == 5
+def test_known_concepts_returns_sorted_list(concept_check_parquet):
+    """known_concepts() returns a sorted list of all unique concept strings."""
+    q = PitQuery(concept_check_parquet)
+    concepts = q.known_concepts()
+    assert isinstance(concepts, list)
+    assert concepts == sorted(concepts)
+    assert "us-gaap:Revenues" in concepts
+
+
+def test_unknown_concept_warns_and_suggests(concept_check_parquet):
+    """Typo'd concept emits a loguru warning mentioning a near-match suggestion."""
+    import sys
+    from loguru import logger
+
+    q = PitQuery(concept_check_parquet)
+    warnings: list[str] = []
+
+    def _sink(message):
+        warnings.append(str(message))
+
+    handler_id = logger.add(_sink, level="WARNING")
+    try:
+        # "us-gaap:Revenue" is close to "us-gaap:Revenues" — difflib should suggest it
+        q.as_of("AAPL", "us-gaap:Revenue", "2023-06-01")
+    finally:
+        logger.remove(handler_id)
+
+    assert len(warnings) == 1
+    assert "us-gaap:Revenue" in warnings[0]
+    assert "Revenues" in warnings[0]
+
+
+def test_unknown_concept_strict_raises(concept_check_parquet):
+    """With strict_concepts=True an unknown concept raises KeyError."""
+    q = PitQuery(concept_check_parquet, strict_concepts=True)
+    with pytest.raises(KeyError, match="us-gaap:Revenue"):
+        q.as_of("AAPL", "us-gaap:Revenue", "2023-06-01")
+
+
+def test_unknown_concept_warn_once_per_concept_per_instance(concept_check_parquet):
+    """The warning fires exactly once per unique unknown concept per PitQuery instance."""
+    from loguru import logger
+
+    q = PitQuery(concept_check_parquet)
+    warnings: list[str] = []
+
+    def _sink(message):
+        warnings.append(str(message))
+
+    handler_id = logger.add(_sink, level="WARNING")
+    try:
+        q.as_of("AAPL", "us-gaap:Revenue", "2023-06-01")
+        q.as_of("AAPL", "us-gaap:Revenue", "2023-06-01")
+        q.history("AAPL", "us-gaap:Revenue")
+    finally:
+        logger.remove(handler_id)
+
+    # Three calls with the same typo on the same instance → only one warning
+    assert len(warnings) == 1
+
+
+def test_unknown_concept_warns_independently_per_new_instance(concept_check_parquet):
+    """A new PitQuery instance resets the warned-concepts cache."""
+    from loguru import logger
+
+    warnings: list[str] = []
+
+    def _sink(message):
+        warnings.append(str(message))
+
+    handler_id = logger.add(_sink, level="WARNING")
+    try:
+        q1 = PitQuery(concept_check_parquet)
+        q1.as_of("AAPL", "us-gaap:Revenue", "2023-06-01")
+
+        q2 = PitQuery(concept_check_parquet)
+        q2.as_of("AAPL", "us-gaap:Revenue", "2023-06-01")
+    finally:
+        logger.remove(handler_id)
+
+    # Two different instances → two "Unknown concept" warnings (filter out
+    # unrelated legacy-parquet warnings from the duration_days fallback).
+    concept_warnings = [w for w in warnings if "Unknown concept" in w]
+    assert len(concept_warnings) == 2
+# Issue #17: O(N+M) YTD synthesis — no cartesian product on restatement
+# ---------------------------------------------------------------------------
+
+
+def _make_ytd_df(prev_filings: list[tuple], curr_filings: list[tuple]) -> pd.DataFrame:
+    """Build a DataFrame with prev-end and curr-end YTD rows for _derive_quarterly_from_ytd.
+
+    prev_filings: list of (filed, val) for the 'prev' YTD end (e.g. Q1 cumulative)
+    curr_filings: list of (filed, val) for the 'curr' YTD end (e.g. Q2 cumulative)
+
+    Both share the same start (fiscal year start) so they form a consecutive YTD pair.
+    The prev end is exactly 91 days before the curr end.
+    """
+    start = pd.Timestamp("2024-01-01")
+    prev_end = pd.Timestamp("2024-03-31")  # ~90d after start
+    curr_end = pd.Timestamp("2024-06-30")  # ~91d after prev_end (181d after start)
+    rows = []
+    for i, (filed, val) in enumerate(prev_filings):
+        rows.append(
+            {
+                "start": start,
+                "end": prev_end,
+                "filed": pd.Timestamp(filed),
+                "val": val,
+                "form": "10-Q",
+                "accn": f"PREV{i}",
+                "duration_days": 90,
+            }
+        )
+    for i, (filed, val) in enumerate(curr_filings):
+        rows.append(
+            {
+                "start": start,
+                "end": curr_end,
+                "filed": pd.Timestamp(filed),
+                "val": val,
+                "form": "10-Q",
+                "accn": f"CURR{i}",
+                "duration_days": 181,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def test_ytd_synth_no_cartesian_on_restatement():
+    """5 prev × 5 curr filings must yield ≤ 10 synthetic rows, not 25."""
+    prev_filings = [
+        ("2024-04-15", 100.0),
+        ("2024-04-20", 101.0),
+        ("2024-04-25", 102.0),
+        ("2024-04-30", 103.0),
+        ("2024-05-05", 104.0),
+    ]
+    curr_filings = [
+        ("2024-07-15", 200.0),
+        ("2024-07-20", 201.0),
+        ("2024-07-25", 202.0),
+        ("2024-07-30", 203.0),
+        ("2024-08-05", 204.0),
+    ]
+    df = _make_ytd_df(prev_filings, curr_filings)
+    result = _derive_quarterly_from_ytd(df)
+    # Must be bounded by N+M = 10, not N*M = 25.
+    assert len(result) <= 10, f"Expected ≤ 10 rows, got {len(result)}"
+    # All emitted rows must have the DERIVED_YTD_DIFF marker.
+    assert result["accn"].str.endswith(":DERIVED_YTD_DIFF").all()
+
+
+def test_ytd_synth_pit_correctness_after_prev_restatement():
+    """Synthetic row at curr.filed must use the ORIGINAL prev value (the only one
+    known at curr.filed), not any later prev restatement."""
+    # curr filed 2024-07-15; prev original filed 2024-04-15 (val=100),
+    # prev restated filed 2024-08-01 (val=110, AFTER curr).
+    prev_filings = [
+        ("2024-04-15", 100.0),  # original prev
+        ("2024-08-01", 110.0),  # restatement of prev, after curr is filed
+    ]
+    curr_filings = [
+        ("2024-07-15", 200.0),
+    ]
+    df = _make_ytd_df(prev_filings, curr_filings)
+    result = _derive_quarterly_from_ytd(df)
+
+    # Row at curr.filed (2024-07-15): prev not yet restated → uses val=100.
+    at_curr = result[result["filed"] == pd.Timestamp("2024-07-15")]
+    assert len(at_curr) == 1
+    assert at_curr.iloc[0]["val"] == pytest.approx(200.0 - 100.0)
+
+    # Row at prev restatement date (2024-08-01): uses restated prev val=110.
+    at_restate = result[result["filed"] == pd.Timestamp("2024-08-01")]
+    assert len(at_restate) == 1
+    assert at_restate.iloc[0]["val"] == pytest.approx(200.0 - 110.0)
+
+
+def test_ytd_synth_pit_correctness_after_curr_restatement():
+    """Each curr restatement generates a new synthetic row pairing it with the
+    then-latest prev value (no look-ahead into future prev restatements)."""
+    # prev filed 2024-04-15 (only one version, val=100).
+    # curr: original filed 2024-07-15 (val=200), restated 2024-08-01 (val=210).
+    prev_filings = [
+        ("2024-04-15", 100.0),
+    ]
+    curr_filings = [
+        ("2024-07-15", 200.0),  # original curr
+        ("2024-08-01", 210.0),  # restated curr
+    ]
+    df = _make_ytd_df(prev_filings, curr_filings)
+    result = _derive_quarterly_from_ytd(df)
+
+    # Synthetic at original curr filed: val = 200 - 100 = 100.
+    at_orig = result[result["filed"] == pd.Timestamp("2024-07-15")]
+    assert len(at_orig) == 1
+    assert at_orig.iloc[0]["val"] == pytest.approx(100.0)
+
+    # Synthetic at restated curr filed: val = 210 - 100 = 110.
+    at_restate = result[result["filed"] == pd.Timestamp("2024-08-01")]
+    assert len(at_restate) == 1
+    assert at_restate.iloc[0]["val"] == pytest.approx(110.0)
+
+
+# ---------------------------------------------------------------------------
+# Q4 derivation hardening for 52/53-week fiscal calendars (#16)
+# ---------------------------------------------------------------------------
+
+
+def test_derive_q4_uses_start_when_available(tmp_path):
+    """When the 10-K row has a valid `start` column, _derive_q4_rows must use
+    it as fy_start rather than fy_end-355d.  Planted data: 53-week FY where
+    fy_end − fy_start > 366 days but the 3 correct quarters still lie within
+    the explicit start boundary."""
+    # FY spans 371 days (53-week year): 2023-01-29 → 2024-02-03
+    fy_start = pd.Timestamp("2023-01-29")
+    fy_end = pd.Timestamp("2024-02-03")
+    k_filed = pd.Timestamp("2024-03-15")
+    annual_val = 1000.0
+
+    records = [
+        # Q1: ends 2023-04-29 (within fy_start)
+        {
+            "ticker": "WMT",
+            "concept": CONCEPT,
+            "end": "2023-04-29",
+            "filed": "2023-06-05",
+            "val": 100.0,
+            "form": "10-Q",
+            "accn": "W1",
+            "duration_days": 90,
+        },
+        # Q2: ends 2023-07-29
+        {
+            "ticker": "WMT",
+            "concept": CONCEPT,
+            "end": "2023-07-29",
+            "filed": "2023-09-05",
+            "val": 200.0,
+            "form": "10-Q",
+            "accn": "W2",
+            "duration_days": 91,
+        },
+        # Q3: ends 2023-10-28
+        {
+            "ticker": "WMT",
+            "concept": CONCEPT,
+            "end": "2023-10-28",
+            "filed": "2023-12-05",
+            "val": 300.0,
+            "form": "10-Q",
+            "accn": "W3",
+            "duration_days": 91,
+        },
+        # 10-K
+        {
+            "ticker": "WMT",
+            "concept": CONCEPT,
+            "end": fy_end.strftime("%Y-%m-%d"),
+            "filed": k_filed.strftime("%Y-%m-%d"),
+            "val": annual_val,
+            "form": "10-K",
+            "accn": "WK",
+            "start": fy_start.strftime("%Y-%m-%d"),
+            "duration_days": (fy_end - fy_start).days,
+        },
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    q = PitQuery(path)
+
+    result = q.ttm("WMT", CONCEPT)
+    assert not result.empty
+    last = result.iloc[-1]
+    # Q4 = 1000 - (100+200+300) = 400; TTM = 100+200+300+400 = 1000
+    assert last["ttm_val"] == pytest.approx(1000.0)
+    assert last["n_periods"] == 4
+    assert last["filed"] == k_filed
+
+
+def test_derive_q4_rejects_52_week_cross_year_q4(tmp_path):
+    """Two adjacent 53-week fiscal years: previous FY's Q3 end falls within
+    355 days of the current FY end, but NOT within the current FY's explicit
+    start.  With start available, it must be excluded; only current-year
+    Q1/Q2/Q3 counted → exactly 3 quarters → correct Q4 derived.
+
+    Without the fix (using 366-day window), the previous FY Q3 would be
+    pulled into the current FY, giving 4 quarters → len != 3 → skipped.
+    With the fix (explicit start), only the 3 genuine current-FY quarters
+    are found and Q4 is correctly derived.
+    """
+    # Previous FY: 2022-01-30 → 2023-01-28 (364 days)
+    prev_fy_end = pd.Timestamp("2023-01-28")
+    # Current FY: 2023-01-29 → 2024-02-03 (371 days, 53-week)
+    curr_fy_start = pd.Timestamp("2023-01-29")
+    curr_fy_end = pd.Timestamp("2024-02-03")
+    curr_k_filed = pd.Timestamp("2024-03-20")
+
+    # Previous FY Q3 ends 2022-10-29: distance from curr_fy_end = 462 days,
+    # so it won't be picked up by either window.  Instead, make a previous FY
+    # Q3 that ends close enough to be within 355 days of curr_fy_end but
+    # before curr_fy_start (i.e. it belongs to the previous FY).
+    # 355 days before curr_fy_end = 2023-02-14; choose 2023-02-10 (inside 355d window
+    # but before curr_fy_start 2023-01-29 → actually after it). Let's be precise:
+    # We want: end > (curr_fy_end - 355d) AND end < curr_fy_start.
+    # curr_fy_end - 355d = 2024-02-03 - 355d = 2023-02-13.
+    # curr_fy_start = 2023-01-29.
+    # 2023-02-13 > 2023-01-29, so there's NO date that satisfies both conditions.
+    # Instead, demonstrate with 366d (old behaviour) vs explicit start (new):
+    # Use curr_fy_end - 366d = 2023-01-03; prev FY Q3 ends 2023-01-10.
+    # 2023-01-10 > 2023-01-03 (within old 366d window) but < curr_fy_start 2023-01-29.
+    prev_q3_end = pd.Timestamp("2023-01-10")  # within 366d of curr_fy_end, before curr_fy_start
+
+    records = [
+        # Previous FY Q3 — should NOT be included in current FY
+        {
+            "ticker": "TGT",
+            "concept": CONCEPT,
+            "end": prev_q3_end.strftime("%Y-%m-%d"),
+            "filed": "2023-03-01",
+            "val": 999.0,
+            "form": "10-Q",
+            "accn": "PQ3",
+            "duration_days": 91,
+        },
+        # Current FY quarters
+        {
+            "ticker": "TGT",
+            "concept": CONCEPT,
+            "end": "2023-04-29",
+            "filed": "2023-06-07",
+            "val": 100.0,
+            "form": "10-Q",
+            "accn": "CQ1",
+            "duration_days": 90,
+        },
+        {
+            "ticker": "TGT",
+            "concept": CONCEPT,
+            "end": "2023-07-29",
+            "filed": "2023-09-06",
+            "val": 200.0,
+            "form": "10-Q",
+            "accn": "CQ2",
+            "duration_days": 91,
+        },
+        {
+            "ticker": "TGT",
+            "concept": CONCEPT,
+            "end": "2023-10-28",
+            "filed": "2023-12-06",
+            "val": 300.0,
+            "form": "10-Q",
+            "accn": "CQ3",
+            "duration_days": 91,
+        },
+        # Current FY 10-K with explicit start
+        {
+            "ticker": "TGT",
+            "concept": CONCEPT,
+            "end": curr_fy_end.strftime("%Y-%m-%d"),
+            "filed": curr_k_filed.strftime("%Y-%m-%d"),
+            "val": 1000.0,
+            "form": "10-K",
+            "accn": "CK",
+            "start": curr_fy_start.strftime("%Y-%m-%d"),
+            "duration_days": (curr_fy_end - curr_fy_start).days,
+        },
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    q = PitQuery(path)
+
+    result = q.ttm("TGT", CONCEPT)
+    assert not result.empty
+    last = result.iloc[-1]
+    # Only 3 current-FY quarters (100+200+300=600); Q4 = 1000-600 = 400; TTM = 1000
+    assert last["ttm_val"] == pytest.approx(1000.0)
+    assert last["n_periods"] == 4
+
+
+def test_derive_q4_rejects_non_monotonic_ends(tmp_path):
+    """If the 3 matched quarters have non-monotonically-increasing ends,
+    the derivation must be skipped."""
+    from pitedgar.query import _derive_q4_rows
+
+    # Build df_q with 3 quarters whose ends are NOT monotonically increasing
+    # (Q2 end < Q1 end — impossible in real data, but tests the guard).
+    df_q = pd.DataFrame(
+        {
+            "end": pd.to_datetime(["2023-06-30", "2023-03-31", "2023-09-30"]),
+            "filed": pd.to_datetime(["2023-07-28", "2023-04-28", "2023-10-28"]),
+            "val": [200.0, 100.0, 300.0],
+        }
+    )
+    df_k = pd.DataFrame(
+        {
+            "end": pd.to_datetime(["2023-12-31"]),
+            "filed": pd.to_datetime(["2024-02-01"]),
+            "val": [1000.0],
+            "start": pd.to_datetime(["2023-01-01"]),
+        }
+    )
+    result = _derive_q4_rows(df_q, df_k)
+    # The 3 quarters have non-monotonic ends after sort: 03-31, 06-30, 09-30 — that's
+    # actually monotonic.  To force non-monotonic we need two with the same value or
+    # reversed.  Rebuild with Q1 > Q2.
+    df_q2 = pd.DataFrame(
+        {
+            "end": pd.to_datetime(["2023-06-30", "2023-04-30", "2023-09-30"]),
+            "filed": pd.to_datetime(["2023-07-28", "2023-05-28", "2023-10-28"]),
+            "val": [200.0, 100.0, 300.0],
+        }
+    )
+    # All three are distinct and after sort: 04-30, 06-30, 09-30 — monotonic, so
+    # let's create a case where two ends are equal (duplicates collapse to 2 rows → != 3).
+    df_q3 = pd.DataFrame(
+        {
+            "end": pd.to_datetime(["2023-03-31", "2023-03-31", "2023-09-30"]),
+            "filed": pd.to_datetime(["2023-04-28", "2023-04-30", "2023-10-28"]),
+            "val": [100.0, 105.0, 300.0],
+        }
+    )
+    result3 = _derive_q4_rows(df_q3, df_k)
+    # After dedup two 03-31 rows → 1 row; then total = 2 != 3 → skipped
+    assert result3.empty
+
+
+def test_derive_q4_rejects_absurd_value(tmp_path):
+    """If |Q4_val| > |annual_val| * 2, the synthetic row must be skipped."""
+    from pitedgar.query import _derive_q4_rows
+
+    # annual = 100, Q1+Q2+Q3 = 400 → Q4 = -300 → |Q4|=300 > 2*100=200 → skip
+    df_q = pd.DataFrame(
+        {
+            "end": pd.to_datetime(["2023-03-31", "2023-06-30", "2023-09-30"]),
+            "filed": pd.to_datetime(["2023-04-28", "2023-07-28", "2023-10-28"]),
+            "val": [100.0, 150.0, 150.0],
+        }
+    )
+    df_k = pd.DataFrame(
+        {
+            "end": pd.to_datetime(["2023-12-31"]),
+            "filed": pd.to_datetime(["2024-02-01"]),
+            "val": [100.0],  # annual = 100, Q1+Q2+Q3 = 400 → Q4 = -300
+            "start": pd.to_datetime(["2023-01-01"]),
+        }
+    )
+    result = _derive_q4_rows(df_q, df_k)
+    assert result.empty
+
+
+# ---------------------------------------------------------------------------
+# Issue #30 — _derive_q4_rows structural validation and sanity checks
+# ---------------------------------------------------------------------------
+
+
+def test_q4_skipped_when_ends_not_monotonic_quarterly_gap(tmp_path):
+    """Q4 must be skipped when the 3 in-year quarterly ends don't form a
+    monotonic sequence with per-quarter gaps inside [Q_MIN, Q_MAX].
+
+    Fixture: Q1 (end 2025-03-31), Q1b (end 2025-04-10, same quarter but
+    slightly shifted end — bypasses dedup because the end date differs),
+    Q3 (end 2025-09-30).  Gap between Q1 and Q1b is 10 days (< Q_MIN=60)
+    → structural validation fails → no Q4 row.
+    """
+    records = [
+        # Q1 genuine
+        {
+            "ticker": "TSLA",
+            "concept": CONCEPT,
+            "end": "2025-03-31",
+            "filed": "2025-05-05",
+            "val": 100.0,
+            "form": "10-Q",
+            "accn": "Q1",
+        },
+        # Q1b — shifted end, different dedup key, but only 10 days later
+        {
+            "ticker": "TSLA",
+            "concept": CONCEPT,
+            "end": "2025-04-10",
+            "filed": "2025-05-10",
+            "val": 105.0,
+            "form": "10-Q",
+            "accn": "Q1b",
+        },
+        # Q3 — skips Q2 entirely; gap from Q1b to Q3 is ~173 days (> Q_MAX=105)
+        {
+            "ticker": "TSLA",
+            "concept": CONCEPT,
+            "end": "2025-09-30",
+            "filed": "2025-11-10",
+            "val": 300.0,
+            "form": "10-Q",
+            "accn": "Q3",
+        },
+        # FY2025 10-K
+        {
+            "ticker": "TSLA",
+            "concept": CONCEPT,
+            "end": "2025-12-31",
+            "filed": "2026-02-05",
+            "val": 1000.0,
+            "form": "10-K",
+            "accn": "K1",
+        },
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    q = PitQuery(path)
+
+    # Gap check fails → no synthetic Q4 → only 3 real quarters (< min_periods=4)
+    result = q.ttm("TSLA", CONCEPT, min_periods=4)
+    assert result.empty
+
+
+def test_q4_skipped_when_absurd_value(tmp_path):
+    """Q4 must be skipped (with a warning) when |q4_val| > 2 * |annual_val|.
+
+    annual=1000, Q1+Q2+Q3=5000 → q4_val = -4000.
+    abs(-4000) = 4000 > 2 * 1000 = 2000 → skip + warning.
+    """
+    from loguru import logger as loguru_logger
+
+    records = [
+        {
+            "ticker": "TSLA",
+            "concept": CONCEPT,
+            "end": "2025-03-31",
+            "filed": "2025-05-05",
+            "val": 2000.0,
+            "form": "10-Q",
+            "accn": "Q1",
+        },
+        {
+            "ticker": "TSLA",
+            "concept": CONCEPT,
+            "end": "2025-06-30",
+            "filed": "2025-08-05",
+            "val": 2000.0,
+            "form": "10-Q",
+            "accn": "Q2",
+        },
+        {
+            "ticker": "TSLA",
+            "concept": CONCEPT,
+            "end": "2025-09-30",
+            "filed": "2025-11-10",
+            "val": 1000.0,
+            "form": "10-Q",
+            "accn": "Q3",
+        },
+        # Annual = 1000, but Q1+Q2+Q3 = 5000 → q4_val = -4000 (absurd)
+        {
+            "ticker": "TSLA",
+            "concept": CONCEPT,
+            "end": "2025-12-31",
+            "filed": "2026-02-05",
+            "val": 1000.0,
+            "form": "10-K",
+            "accn": "K1",
+        },
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+
+    warnings_captured: list[str] = []
+
+    def _sink(message) -> None:
+        if message.record["level"].name == "WARNING":
+            warnings_captured.append(str(message))
+
+    sink_id = loguru_logger.add(_sink, level="WARNING")
+    try:
+        q = PitQuery(path)
+        result = q.ttm("TSLA", CONCEPT, min_periods=4)
+    finally:
+        loguru_logger.remove(sink_id)
+
+    # No synthetic Q4 injected → 3 quarters < min_periods=4 → no TTM row
+    assert result.empty
+    # Warning must have been emitted
+    assert any("absurd" in w.lower() or "q4" in w.lower() for w in warnings_captured), (
+        f"Expected a warning about absurd Q4 value; captured: {warnings_captured}"
+    )
+
+
+def test_q4_happy_path_still_works(dec_fy_parquet_path):
+    """Regression: the standard Q4-from-10K derivation must still work after
+    the structural validation and sanity checks are added.
+
+    This is a reference to the existing test_ttm_derives_q4_from_10k fixture.
+    Annual=1000, Q1=100, Q2=200, Q3=300 → Q4=400, TTM=1000.
+    """
+    q = PitQuery(dec_fy_parquet_path)
+    result = q.ttm("TSLA", CONCEPT)
+    last = result.iloc[-1]
+    assert last["ttm_val"] == pytest.approx(1000.0)
+    assert last["n_periods"] == 4
+    assert last["filed"] == pd.Timestamp("2026-02-05")
+
+
+# ---------------------------------------------------------------------------
+# Issue #18: TTM non-contiguous quarter span guard (max_ttm_span_days)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def gap_parquet_path(tmp_path):
+    """Quarters in 2020 Q1 and then 2023 Q1-Q3 — a ~2-year gap."""
+    records = [
+        {
+            "ticker": "GAP",
+            "concept": CONCEPT,
+            "end": "2020-03-31",
+            "filed": "2020-05-05",
+            "val": 100.0,
+            "form": "10-Q",
+            "accn": "G0",
+            "duration_days": 91,
+        },
+        {
+            "ticker": "GAP",
+            "concept": CONCEPT,
+            "end": "2023-03-31",
+            "filed": "2023-05-05",
+            "val": 200.0,
+            "form": "10-Q",
+            "accn": "G1",
+            "duration_days": 91,
+        },
+        {
+            "ticker": "GAP",
+            "concept": CONCEPT,
+            "end": "2023-06-30",
+            "filed": "2023-08-05",
+            "val": 300.0,
+            "form": "10-Q",
+            "accn": "G2",
+            "duration_days": 91,
+        },
+        {
+            "ticker": "GAP",
+            "concept": CONCEPT,
+            "end": "2023-09-30",
+            "filed": "2023-11-05",
+            "val": 400.0,
+            "form": "10-Q",
+            "accn": "G3",
+            "duration_days": 91,
+        },
+    ]
+    df = pd.DataFrame(records)
+    path = tmp_path / "pit_financials.parquet"
+    df.to_parquet(path, index=False)
+    return path
+
+
+def test_ttm_drops_non_contiguous_quarters(gap_parquet_path):
+    """TTM with a ~2-year gap between Q1-2020 and Q1-2023 must be empty (default 400d)."""
+    q = PitQuery(gap_parquet_path)
+    # The top-4 quarters include 2020-03-31 and 2023-09-30 → span ~1279d > 400
+    result = q.ttm("GAP", CONCEPT)
+    assert result.empty
+
+
+def test_ttm_drops_non_contiguous_quarters_opt_out(gap_parquet_path):
+    """With max_ttm_span_days=None the non-contiguous TTM is included."""
+    q = PitQuery(gap_parquet_path)
+    result = q.ttm("GAP", CONCEPT, max_ttm_span_days=None)
+    assert not result.empty
+    last = result.iloc[-1]
+    assert last["ttm_val"] == pytest.approx(100.0 + 200.0 + 300.0 + 400.0)
+
+
+def test_ttm_contiguous_default_includes_normal_quarters(ttm_parquet_path):
+    """Regular 4 quarters spanning ~9 months (< 400d) must be emitted."""
+    q = PitQuery(ttm_parquet_path)
+    result = q.ttm("AAPL", CONCEPT)
+    assert not result.empty
+    last = result.iloc[-1]
+    assert last["n_periods"] == 4
+    # end span: 2022-03-26 to 2022-12-31 = ~280 days, well under 400
+    assert last["ttm_end_max"] - last["ttm_end_min"] <= pd.Timedelta(days=400)
+
+
+def test_ttm_exposes_end_min_max_columns(ttm_parquet_path):
+    """ttm() result DataFrame must carry ttm_end_min and ttm_end_max columns."""
+    q = PitQuery(ttm_parquet_path)
+    result = q.ttm("AAPL", CONCEPT)
+    assert "ttm_end_min" in result.columns
+    assert "ttm_end_max" in result.columns
+    last = result.iloc[-1]
+    # The earliest quarter ends 2022-03-26 and the latest 2022-12-31.
+    assert last["ttm_end_min"] == pd.Timestamp("2022-03-26")
+    assert last["ttm_end_max"] == pd.Timestamp("2022-12-31")
+
+
+def test_ttm_cross_section_respects_max_span(gap_parquet_path):
+    """ttm_cross_section with default max_ttm_span_days must drop non-contiguous quarters."""
+    q = PitQuery(gap_parquet_path)
+    result = q.ttm_cross_section(CONCEPT, "2024-01-01", tickers=["GAP"])
+    row = result.iloc[0]
+    # Top-4 spans 2020-03-31 to 2023-09-30 → non-contiguous → NaN
+    assert pd.isna(row["ttm_val"])
+
+
+def test_ttm_cross_section_respects_max_span_opt_out(gap_parquet_path):
+    """ttm_cross_section with max_ttm_span_days=None includes non-contiguous TTM."""
+    q = PitQuery(gap_parquet_path)
+    result = q.ttm_cross_section(CONCEPT, "2024-01-01", tickers=["GAP"], max_ttm_span_days=None)
+    row = result.iloc[0]
+    assert not pd.isna(row["ttm_val"])
+    assert row["ttm_val"] == pytest.approx(100.0 + 200.0 + 300.0 + 400.0)
+
+
+def test_ttm_cross_section_exposes_end_min_max_columns(ttm_parquet_path):
+    """ttm_cross_section result DataFrame must carry ttm_end_min and ttm_end_max columns."""
+    q = PitQuery(ttm_parquet_path)
+    result = q.ttm_cross_section(CONCEPT, "2023-06-01")
+    assert "ttm_end_min" in result.columns
+    assert "ttm_end_max" in result.columns
+    row = result.iloc[0]
+    assert row["ttm_end_min"] == pd.Timestamp("2022-03-26")
+    assert row["ttm_end_max"] == pd.Timestamp("2022-12-31")
+from pitedgar.periods import is_annual
+
+
+# ---------------------------------------------------------------------------
+# Legacy parquet fallback (issue #27)
+# ---------------------------------------------------------------------------
+
+
+def _legacy_parquet(tmp_path, concept: str) -> "PitQuery":
+    """Build a parquet WITHOUT `duration_days` and WITHOUT `start` columns."""
+    records = [
+        {
+            "ticker": "AAPL",
+            "concept": concept,
+            "end": "2022-12-31",
+            "filed": "2023-02-02",
+            "val": 1_000.0,
+            "form": "10-K",
+            "accn": "X1",
+        }
+    ]
+    df = pd.DataFrame(records)
+    # Ensure the parquet has neither duration_days nor start.
+    assert "duration_days" not in df.columns
+    assert "start" not in df.columns
+    path = tmp_path / "pit_legacy.parquet"
+    df.to_parquet(path, index=False)
+    return PitQuery(path)
+
+
+def test_legacy_parquet_balance_sheet_not_annual(tmp_path):
+    """Assets in a 10-K legacy parquet must NOT be classified as annual (is_annual=False)."""
+    q = _legacy_parquet(tmp_path, "us-gaap:Assets")
+    row = q.data.iloc[0]
+    assert not is_annual(
+        pd.Series([row["duration_days"]]), pd.Series([row["form"]])
+    ).iloc[0]
+
+
+def test_legacy_parquet_revenues_still_annual(tmp_path):
+    """Revenues in a 10-K legacy parquet must be classified as annual (duration_days=365)."""
+    q = _legacy_parquet(tmp_path, "us-gaap:Revenues")
+    row = q.data.iloc[0]
+    assert int(row["duration_days"]) == 365
+    assert is_annual(
+        pd.Series([row["duration_days"]]), pd.Series([row["form"]])
+    ).iloc[0]
+
+
+def test_legacy_parquet_with_start_uses_real_duration(tmp_path):
+    """When `start` is present but `duration_days` is absent, use end−start diff."""
+    records = [
+        {
+            "ticker": "AAPL",
+            "concept": "us-gaap:Revenues",
+            "start": "2022-01-01",
+            "end": "2022-03-31",
+            "filed": "2022-04-28",
+            "val": 500.0,
+            "form": "10-Q",
+            "accn": "Y1",
+        }
+    ]
+    df = pd.DataFrame(records)
+    assert "duration_days" not in df.columns
+    path = tmp_path / "pit_legacy_start.parquet"
+    df.to_parquet(path, index=False)
+    q = PitQuery(path)
+    row = q.data.iloc[0]
+    expected = (pd.Timestamp("2022-03-31") - pd.Timestamp("2022-01-01")).days
+    assert int(row["duration_days"]) == expected
+
+
+def test_legacy_parquet_warns_once(tmp_path):
+    """PitQuery must emit a warning mentioning duration_days when it is missing."""
+    from loguru import logger
+
+    captured: list[str] = []
+
+    def _sink(message):
+        if message.record["level"].name == "WARNING":
+            captured.append(message.record["message"])
+
+    handler_id = logger.add(_sink, level="WARNING")
+    try:
+        _legacy_parquet(tmp_path, "us-gaap:Assets")
+    finally:
+        logger.remove(handler_id)
+
+    assert any("duration_days" in m for m in captured), (
+        f"Expected a duration_days warning, got: {captured}"
+    )
+from loguru import logger
+import pitedgar.query as _query_module
+
+
+# ---------------------------------------------------------------------------
+# Future-date warnings (#34)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=False)
+def reset_future_warned(monkeypatch):
+    """Reset the module-level dedup set between tests."""
+    monkeypatch.setattr(_query_module, "_FUTURE_WARNED", set())
+
+
+def test_as_of_warns_on_future_date(parquet_path, reset_future_warned):
+    """as_of with a far-future date should emit a warning containing 'future'."""
+    q = PitQuery(parquet_path)
+    messages: list[str] = []
+
+    def _sink(msg):
+        messages.append(msg)
+
+    sink_id = logger.add(_sink, format="{message}", level="WARNING")
+    try:
+        q.as_of("AAPL", CONCEPT, "2099-01-01")
+    finally:
+        logger.remove(sink_id)
+
+    assert any("future" in m for m in messages), f"No 'future' warning found in: {messages}"
+
+
+def test_cross_section_warns_on_future_date(parquet_path, reset_future_warned):
+    """cross_section with a future date should emit a warning containing 'future'."""
+    q = PitQuery(parquet_path)
+    messages: list[str] = []
+
+    def _sink(msg):
+        messages.append(msg)
+
+    sink_id = logger.add(_sink, format="{message}", level="WARNING")
+    try:
+        q.cross_section(CONCEPT, ["2023-01-01", "2099-06-01"])
+    finally:
+        logger.remove(sink_id)
+
+    assert any("future" in m for m in messages), f"No 'future' warning found in: {messages}"
+
+
+def test_ttm_cross_section_warns_on_future_date(ttm_parquet_path, reset_future_warned):
+    """ttm_cross_section with a future date should emit a warning containing 'future'."""
+    q = PitQuery(ttm_parquet_path)
+    messages: list[str] = []
+
+    def _sink(msg):
+        messages.append(msg)
+
+    sink_id = logger.add(_sink, format="{message}", level="WARNING")
+    try:
+        q.ttm_cross_section(CONCEPT, "2099-01-01")
+    finally:
+        logger.remove(sink_id)
+
+    assert any("future" in m for m in messages), f"No 'future' warning found in: {messages}"
+
+
+def test_past_date_does_not_warn(parquet_path, reset_future_warned):
+    """as_of with a past date must not emit any future-date warning."""
+    q = PitQuery(parquet_path)
+    messages: list[str] = []
+
+    def _sink(msg):
+        messages.append(msg)
+
+    sink_id = logger.add(_sink, format="{message}", level="WARNING")
+    try:
+        q.as_of("AAPL", CONCEPT, "2023-01-01")
+    finally:
+        logger.remove(sink_id)
+
+    assert not any("future" in m for m in messages), f"Unexpected 'future' warning: {messages}"

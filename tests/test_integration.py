@@ -144,7 +144,8 @@ def test_map_build_query_roundtrip(pipeline_dirs, mocker):
 
 
 def test_build_triggers_scale_correction_for_thousands_filer(tmp_path):
-    """Filers reporting in thousands ($) must be rescaled 1000x and flagged."""
+    """Filers reporting in thousands ($) must be rescaled 1000x and flagged when
+    scale_correction='auto' and at least 2 distinct USD concepts are below threshold."""
     data_dir = tmp_path / "data"
     facts_dir = data_dir / "companyfacts"
     facts_dir.mkdir(parents=True)
@@ -166,7 +167,21 @@ def test_build_triggers_scale_correction_for_thousands_filer(tmp_path):
                             }
                         ]
                     }
-                }
+                },
+                # Second USD concept below threshold — needed for auto heuristic to fire.
+                "Assets": {
+                    "units": {
+                        "USD": [
+                            {
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 800,
+                                "form": "10-K",
+                                "accn": "A2",
+                            }
+                        ]
+                    }
+                },
             }
         }
     }
@@ -176,11 +191,16 @@ def test_build_triggers_scale_correction_for_thousands_filer(tmp_path):
     cik_map = pd.DataFrame({"cik": [cik]}, index=pd.Index(["TINY"], name="ticker"))
     cik_map.to_parquet(data_dir / "ticker_cik_map.parquet")
 
-    config = PitEdgarConfig(edgar_identity="Test test@example.com", data_dir=data_dir)
+    config = PitEdgarConfig(
+        edgar_identity="Test test@example.com",
+        data_dir=data_dir,
+        scale_correction="auto",
+    )
     master = parse_all(config, cik_map, force=True)
 
     assert master["scale_corrected"].all()
-    assert master["val"].iloc[0] == 500 * 1000
+    rev_row = master[master["concept"] == "us-gaap:Revenues"].iloc[0]
+    assert rev_row["val"] == 500 * 1000
 
 
 def test_build_is_atomic_under_simulated_crash(pipeline_dirs, mocker):

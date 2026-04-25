@@ -1,10 +1,49 @@
 """PIT query API over the master parquet."""
 
+import difflib
 from pathlib import Path
 
 import pandas as pd
+from loguru import logger
 
 from pitedgar.periods import Q_MAX, Q_MIN, is_annual, is_quarterly
+
+# Balance-sheet concepts that carry instant (point-in-time) values.
+# Used by the legacy-parquet fallback: these should get duration_days=-1
+# (not the form-derived 365) so they are excluded from is_annual / TTM filters.
+_BALANCE_SHEET_CONCEPTS: frozenset[str] = frozenset(
+    {
+        "us-gaap:Assets",
+        "us-gaap:Liabilities",
+        "us-gaap:StockholdersEquity",
+        "us-gaap:CashAndCashEquivalentsAtCarryingValue",
+        "us-gaap:LongTermDebt",
+        "us-gaap:CommonStockSharesOutstanding",
+    }
+)
+
+# ---------------------------------------------------------------------------
+# Future-date warning helper
+# ---------------------------------------------------------------------------
+
+_FUTURE_WARNED: set = set()  # module-level dedup across calls
+
+
+def _warn_if_future(dates: "pd.DatetimeIndex | list[pd.Timestamp]") -> None:
+    """Emit a one-time warning when any of *dates* lies in the future."""
+    today = pd.Timestamp.today().normalize()
+    future = [d for d in pd.DatetimeIndex(dates) if d > today + pd.Timedelta(days=1)]
+    if not future:
+        return
+    key = (min(future), max(future))
+    if key in _FUTURE_WARNED:
+        return
+    _FUTURE_WARNED.add(key)
+    logger.warning(
+        f"{len(future)} as_of_date(s) are in the future "
+        f"(e.g. {future[0].date()} … {future[-1].date()}). "
+        f"Most likely a typo; the query will still return the latest known filing."
+    )
 
 
 def _snapshot_events(grp: pd.DataFrame) -> pd.DataFrame:
@@ -67,13 +106,26 @@ def _derive_q4_rows(df_q: pd.DataFrame, df_k: pd.DataFrame) -> pd.DataFrame:
     if df_k.empty or df_q.empty:
         return pd.DataFrame(columns=["end", "filed", "val"])
 
+    # Detect whether the 10-K rows carry a `start` column (parser may have
+    # written it; older fixtures / legacy parquets may not).
+    k_has_start = "start" in df_k.columns
+
     rows = []
     for _, k_row in df_k.iterrows():
         fy_end = k_row["end"]
         k_filed = k_row["filed"]
         annual_val = k_row["val"]
 
-        fy_start = fy_end - pd.Timedelta(days=366)
+        # Prefer the 10-K's own fiscal-year start when available.  This is the
+        # critical fix for 52/53-week fiscal calendars (Target, Walmart, Costco):
+        # adjacent fiscal years can otherwise have Q4 end-dates that fall within
+        # a 366-day window of the following fiscal year, inflating the count.
+        # Fall back to a conservative 355-day window (less than 366 to avoid the
+        # cross-year bleed) when the start column is missing or NaT.
+        if k_has_start and pd.notna(k_row["start"]):
+            fy_start = k_row["start"]
+        else:
+            fy_start = fy_end - pd.Timedelta(days=355)
 
         # 10-Q quarters within this fiscal year that were filed by the 10-K date.
         q_in_year = df_q[
@@ -90,7 +142,55 @@ def _derive_q4_rows(df_q: pd.DataFrame, df_k: pd.DataFrame) -> pd.DataFrame:
             # Require all three quarters present to safely isolate Q4.
             continue
 
+        # --- Structural validation of the 3 matched quarters ---
+        q_ends = q_in_year.sort_values("end")["end"].tolist()
+
+        # 1. Ends must be strictly monotonically increasing.
+        if q_ends[0] >= q_ends[1] or q_ends[1] >= q_ends[2]:
+            logger.debug(
+                "_derive_q4_rows: skipping fy_end=%s — quarter ends not monotonically increasing: %s",
+                fy_end.date(),
+                [e.date() for e in q_ends],
+            )
+            continue
+
+        # 2. Cumulative span (Q1_end → Q3_end) must fall in [150, 280] days.
+        span = (q_ends[2] - q_ends[0]).days
+        if not (150 <= span <= 280):
+            logger.debug(
+                "_derive_q4_rows: skipping fy_end=%s — Q1→Q3 span %d days outside [150, 280]",
+                fy_end.date(),
+                span,
+            )
+            continue
+
+        # 3. Each successive gap must be within the quarterly range [Q_MIN, Q_MAX].
+        gap_01 = (q_ends[1] - q_ends[0]).days
+        gap_12 = (q_ends[2] - q_ends[1]).days
+        if not (Q_MIN <= gap_01 <= Q_MAX) or not (Q_MIN <= gap_12 <= Q_MAX):
+            logger.debug(
+                "_derive_q4_rows: skipping fy_end=%s — quarter gaps %d/%d outside [%d, %d]",
+                fy_end.date(),
+                gap_01,
+                gap_12,
+                Q_MIN,
+                Q_MAX,
+            )
+            continue
+
         q4_val = annual_val - q_in_year["val"].sum()
+
+        # 4. Sanity check: |Q4| must not exceed 2× the annual value.
+        if abs(q4_val) > abs(annual_val) * 2:
+            logger.warning(
+                "_derive_q4_rows: skipping fy_end=%s — synthetic Q4 value %g seems absurd "
+                "(annual=%g); likely wrong quarters matched",
+                fy_end.date(),
+                q4_val,
+                annual_val,
+            )
+            continue
+
         rows.append({"end": fy_end, "filed": k_filed, "val": q4_val})
 
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["end", "filed", "val"])
@@ -153,25 +253,64 @@ def _derive_quarterly_from_ytd(df: pd.DataFrame) -> pd.DataFrame:
             duration = (curr_end - prev_end).days
             if duration < Q_MIN or duration > Q_MAX:
                 continue
-            prev_rows = grp[grp["end"] == prev_end]
-            curr_rows = grp[grp["end"] == curr_end]
-            for _, p in prev_rows.iterrows():
-                for _, c in curr_rows.iterrows():
-                    filed = p["filed"] if p["filed"] >= c["filed"] else c["filed"]
-                    src_accn = c.get("accn", "")
-                    src_form = c.get("form", "")
-                    rows.append(
-                        {
-                            "end": curr_end,
-                            "filed": filed,
-                            "val": c["val"] - p["val"],
-                            "duration_days": duration,
-                            "form": src_form,
-                            "accn": f"{src_accn}:DERIVED_YTD_DIFF",
-                            "start": prev_end,
-                        }
-                    )
-    return pd.DataFrame(rows, columns=_SYNTH_COLS) if rows else empty
+            prev_rows = grp[grp["end"] == prev_end].sort_values("filed").reset_index(drop=True)
+            curr_rows = grp[grp["end"] == curr_end].sort_values("filed").reset_index(drop=True)
+
+            # O(N+M) sweep: merge the two sorted-by-filed streams and emit one
+            # synthetic row per "event" using the current latest-of-both.
+            # Each event is either a new curr filing or a new prev filing.
+            # At every event the synthetic filed = max(latest_prev.filed, curr.filed)
+            # (or max(prev.filed, latest_curr.filed) for a prev-only event).
+            pi = 0  # index into prev_rows
+            ci = 0  # index into curr_rows
+            latest_prev_idx: int | None = None
+            latest_curr_idx: int | None = None
+            n_prev = len(prev_rows)
+            n_curr = len(curr_rows)
+
+            while pi < n_prev or ci < n_curr:
+                # Determine which stream has the next (earliest) event.
+                prev_filed = prev_rows.iloc[pi]["filed"] if pi < n_prev else None
+                curr_filed = curr_rows.iloc[ci]["filed"] if ci < n_curr else None
+
+                # Advance the stream with the smaller filed date (ties: advance both).
+                advance_prev = prev_filed is not None and (curr_filed is None or prev_filed <= curr_filed)
+                advance_curr = curr_filed is not None and (prev_filed is None or curr_filed <= prev_filed)
+
+                if advance_prev:
+                    latest_prev_idx = pi
+                    pi += 1
+                if advance_curr:
+                    latest_curr_idx = ci
+                    ci += 1
+
+                # Emit a row only when both streams have contributed at least one filing.
+                if latest_prev_idx is None or latest_curr_idx is None:
+                    continue
+
+                p = prev_rows.iloc[latest_prev_idx]
+                c = curr_rows.iloc[latest_curr_idx]
+                filed = p["filed"] if p["filed"] >= c["filed"] else c["filed"]
+                src_accn = c.get("accn", "")
+                src_form = c.get("form", "")
+                rows.append(
+                    {
+                        "end": curr_end,
+                        "filed": filed,
+                        "val": c["val"] - p["val"],
+                        "duration_days": duration,
+                        "form": src_form,
+                        "accn": f"{src_accn}:DERIVED_YTD_DIFF",
+                        "start": prev_end,
+                    }
+                )
+
+    result = pd.DataFrame(rows, columns=_SYNTH_COLS) if rows else empty
+    # Collapse any duplicate (end, filed) pairs that the sweep may emit when both
+    # streams advance on the same date — keep last (latest val, consistent with PIT).
+    if not result.empty:
+        result = result.drop_duplicates(subset=["end", "filed"], keep="last")
+    return result
 
 
 def _combine_quarterly_sources(
@@ -200,7 +339,11 @@ def _combine_quarterly_sources(
     return combined
 
 
-def _ttm_events(grp: pd.DataFrame, min_periods: int = 4) -> pd.DataFrame:
+def _ttm_events(
+    grp: pd.DataFrame,
+    min_periods: int = 4,
+    max_gap_days: int | None = 400,
+) -> pd.DataFrame:
     """Compute TTM step-function events for one ticker from sorted 10-Q rows.
 
     Uses a running-state dict: each filing date updates the current value for
@@ -208,10 +351,14 @@ def _ttm_events(grp: pd.DataFrame, min_periods: int = 4) -> pd.DataFrame:
     Complexity: O(n log n) — dominated by the top-4 sort, not a DataFrame scan.
 
     Args:
-        grp:         DataFrame with columns end, filed, val, sorted by filed ascending.
-        min_periods: minimum distinct quarters required before emitting a row.
+        grp:          DataFrame with columns end, filed, val, sorted by filed ascending.
+        min_periods:  minimum distinct quarters required before emitting a row.
+        max_gap_days: maximum allowed span (in days) between the earliest and latest
+                      of the top-4 quarter end dates. When the span exceeds this
+                      threshold the row is silently dropped (non-contiguous quarters).
+                      Pass ``None`` to disable the check.
 
-    Returns DataFrame with columns: filed, ttm_val, n_periods.
+    Returns DataFrame with columns: filed, ttm_val, n_periods, ttm_end_min, ttm_end_max.
     """
     state: dict = {}  # {end_timestamp: val}
     rows = []
@@ -229,27 +376,99 @@ def _ttm_events(grp: pd.DataFrame, min_periods: int = 4) -> pd.DataFrame:
         top = sorted(state.keys(), reverse=True)[:4]
         n = len(top)
         if n >= min_periods:
-            rows.append({"filed": current_filed, "ttm_val": sum(state[k] for k in top), "n_periods": n})
+            end_min = min(top)
+            end_max = max(top)
+            if max_gap_days is not None:
+                span_days = (pd.Timestamp(end_max) - pd.Timestamp(end_min)).days
+                if span_days > max_gap_days:
+                    continue
+            rows.append(
+                {
+                    "filed": current_filed,
+                    "ttm_val": sum(state[k] for k in top),
+                    "n_periods": n,
+                    "ttm_end_min": end_min,
+                    "ttm_end_max": end_max,
+                }
+            )
 
-    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["filed", "ttm_val", "n_periods"])
+    empty_cols = ["filed", "ttm_val", "n_periods", "ttm_end_min", "ttm_end_max"]
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=empty_cols)
 
 
 class PitQuery:
     """Query point-in-time financial data from a master parquet file."""
 
-    def __init__(self, parquet_path: Path) -> None:
-        self.data = pd.read_parquet(parquet_path)
+    def __init__(
+        self,
+        parquet_path: Path,
+        tickers: list[str] | None = None,
+        concepts: list[str] | None = None,
+        since: str | pd.Timestamp | None = None,
+        strict_concepts: bool = False,
+    ) -> None:
+        filters: list[tuple] = []
+        if tickers:
+            filters.append(("ticker", "in", [t.upper() for t in tickers]))
+        if concepts:
+            filters.append(("concept", "in", concepts))
+        if since is not None:
+            since_str = pd.Timestamp(since).strftime("%Y-%m-%d")
+            filters.append(("filed", ">=", since_str))
+        self.data = pd.read_parquet(parquet_path, filters=filters or None)
+        self.strict_concepts = strict_concepts
+        self._warned_concepts: set[str] = set()
         self.data["filed"] = pd.to_datetime(self.data["filed"], errors="coerce")
         self.data["end"] = pd.to_datetime(self.data["end"], errors="coerce")
-        # `start` is required by YTD-chain synthesis in ttm(); older fixtures and
-        # legacy parquets may lack it, in which case synthesis silently no-ops.
         if "start" in self.data.columns:
             self.data["start"] = pd.to_datetime(self.data["start"], errors="coerce")
         # Ensure duration_days exists for period classification. The parser always
-        # writes this column; for test fixtures or legacy parquets without it,
-        # infer from form (10-Q → 91, 10-K → 365) as a safe approximation.
+        # writes this column; for legacy parquets without it, infer heuristically.
         if "duration_days" not in self.data.columns:
-            self.data["duration_days"] = self.data["form"].map({"10-Q": 91, "10-K": 365}).fillna(-1)
+            has_start = (
+                "start" in self.data.columns and self.data["start"].notna().any()
+            )
+            if has_start:
+                self.data["duration_days"] = (
+                    (self.data["end"] - self.data["start"]).dt.days.fillna(-1).astype(int)
+                )
+            else:
+                # Heuristic fallback: assign -1 (instant) to known balance-sheet
+                # concepts so they are not misclassified as annual flow rows.
+                form_map = self.data["form"].map({"10-Q": 91, "10-K": 365}).fillna(-1)
+                bs_mask = self.data["concept"].isin(_BALANCE_SHEET_CONCEPTS)
+                self.data["duration_days"] = form_map.where(~bs_mask, -1).astype(int)
+            logger.warning(
+                "Parquet lacks `duration_days` — inferred heuristically. "
+                "Re-run `pitedgar build --force` with v0.4+ to get precise values."
+            )
+        self._known_concepts: set[str] = set(self.data["concept"].unique())
+
+    # ------------------------------------------------------------------
+    # Concept validation
+    # ------------------------------------------------------------------
+
+    def known_concepts(self) -> list[str]:
+        """Return a sorted list of all concept strings present in the loaded parquet."""
+        return sorted(self._known_concepts)
+
+    def _check_concept(self, concept: str) -> None:
+        """Validate *concept* against the loaded data; warn or raise on unknown concepts."""
+        if concept in self._known_concepts:
+            return
+        suggestions = difflib.get_close_matches(concept, self._known_concepts, n=3, cutoff=0.6)
+        if self.strict_concepts:
+            raise KeyError(
+                f"Unknown concept {concept!r}. "
+                f"Nearest: {suggestions}. See q.known_concepts() for available."
+            )
+        if concept not in self._warned_concepts:
+            self._warned_concepts.add(concept)
+            logger.warning(
+                "Unknown concept {!r}. Nearest: {}. See q.known_concepts() for full list.",
+                concept,
+                suggestions,
+            )
 
     # ------------------------------------------------------------------
     # Public API
@@ -289,9 +508,11 @@ class PitQuery:
 
         Returns DataFrame with columns: ticker, val, filed, end, form, age_days
         """
+        self._check_concept(concept)
         if isinstance(tickers, str):
             tickers = [tickers]
         as_of_ts = pd.Timestamp(as_of_date)
+        _warn_if_future([as_of_ts])
 
         mask = (
             self.data["ticker"].isin(tickers)
@@ -342,22 +563,45 @@ class PitQuery:
         concept: str,
         start_date: str | None = None,
         end_date: str | None = None,
+        as_of: str | pd.Timestamp | None = None,
         freq: str = "Q",
     ) -> pd.DataFrame:
         """Point-in-time history of a concept for a single ticker.
 
+        WARNING — default ``as_of=None`` is NON-PIT:
+            When ``as_of`` is not supplied, this method returns the
+            *latest-filed* (most-restated) value for every period end,
+            regardless of when those filings occurred. Future filings that
+            would not have been available at the time are silently included.
+            Do NOT use the default in any backtest feature pipeline. Pass an
+            explicit ``as_of`` date to get a proper point-in-time series.
+
+        PIT usage (``as_of`` is provided):
+            Only filings with ``filed <= as_of`` are considered. For each
+            period end, the most-recently-filed value *as of that date* is
+            returned. This gives the correct restated-as-of view and prevents
+            look-ahead bias.
+
         Args:
             ticker:     company ticker symbol.
             concept:    XBRL concept, e.g. "us-gaap:Revenues".
-            start_date: filter end >= start_date (ISO string).
-            end_date:   filter end <= end_date (ISO string).
+            start_date: filter end >= start_date (ISO string). Filters on
+                        period-end date, not filing date.
+            end_date:   filter end <= end_date (ISO string). Filters on
+                        period-end date, not filing date.
+            as_of:      observation date (ISO string or Timestamp). When
+                        provided, restricts to filings with filed <= as_of
+                        before deduplicating. Default ``None`` keeps all
+                        filings (non-PIT — see warning above).
             freq:       "Q" → quarterly periods (60-105 days),
                         "A" → annual filings (10-K/A/20-F with 340-380 day duration),
                         anything else → all.
 
         Returns DataFrame with columns: ticker, concept, end, filed, val, form, accn.
-        For each period end, shows the latest-filed (restated) value.
+        For each period end, shows the latest-filed (restated) value as of
+        ``as_of`` (if provided) or the globally latest-filed value (if not).
         """
+        self._check_concept(concept)
         mask = (self.data["ticker"] == ticker) & (self.data["concept"] == concept)
 
         # Classify by duration_days, not form: some filers (notably Apple for
@@ -371,6 +615,13 @@ class PitQuery:
             mask &= is_annual(self.data["duration_days"], self.data["form"])
 
         sub = self.data.loc[mask].copy()
+
+        # PIT filter: restrict to filings known as of the observation date.
+        # This must happen BEFORE the end-date dedup so we get the correct
+        # restated value for each period end as of that date.
+        if as_of is not None:
+            as_of_ts = pd.Timestamp(as_of)
+            sub = sub[sub["filed"] <= as_of_ts]
 
         if start_date is not None:
             sub = sub[sub["end"] >= pd.Timestamp(start_date)]
@@ -388,6 +639,7 @@ class PitQuery:
         start_date: str | None = None,
         end_date: str | None = None,
         min_periods: int = 4,
+        max_ttm_span_days: int | None = 400,
     ) -> pd.DataFrame:
         """Point-in-time trailing-twelve-month series from quarterly filings.
 
@@ -396,14 +648,22 @@ class PitQuery:
         min_periods available quarters are dropped.
 
         Args:
-            ticker:      company ticker symbol.
-            concept:     XBRL concept, e.g. "us-gaap:Revenues".
-            start_date:  include only rows with filed >= start_date.
-            end_date:    include only rows with filed <= end_date.
-            min_periods: minimum quarters required to emit a TTM row (default 4).
+            ticker:              company ticker symbol.
+            concept:             XBRL concept, e.g. "us-gaap:Revenues".
+            start_date:          include only rows with filed >= start_date.
+            end_date:            include only rows with filed <= end_date.
+            min_periods:         minimum quarters required to emit a TTM row (default 4).
+            max_ttm_span_days:   maximum span (in days) between the earliest and latest
+                                 of the top-4 quarter end dates. Rows whose top-4 end
+                                 span exceeds this threshold are silently dropped (treat
+                                 non-contiguous quarters: fiscal-year changes, mergers,
+                                 delistings). Default 400. Pass ``None`` to disable.
 
-        Returns DataFrame with columns: ticker, concept, filed, ttm_val, n_periods
+        Returns DataFrame with columns: ticker, concept, filed, ttm_val, n_periods,
+            ttm_end_min, ttm_end_max
         """
+        self._check_concept(concept)
+        _empty_cols = ["ticker", "concept", "filed", "ttm_val", "n_periods", "ttm_end_min", "ttm_end_max"]
         base_mask = (self.data["ticker"] == ticker) & (self.data["concept"] == concept)
         sub_all = self.data.loc[base_mask]
         sub_k = sub_all.loc[is_annual(sub_all["duration_days"], sub_all["form"])]
@@ -415,7 +675,7 @@ class PitQuery:
         sub = _combine_quarterly_sources(sub_all, is_quarterly(sub_all["duration_days"])).sort_values("filed")
 
         if sub.empty:
-            return pd.DataFrame(columns=["ticker", "concept", "filed", "ttm_val", "n_periods"])
+            return pd.DataFrame(columns=_empty_cols)
 
         # Inject synthetic Q4 rows derived from 10-K annual filings so that
         # December-FY companies (and others whose Q4 only appears in a 10-K)
@@ -424,9 +684,9 @@ class PitQuery:
         if not q4_rows.empty:
             sub = pd.concat([sub, q4_rows], ignore_index=True).sort_values("filed")
 
-        result = _ttm_events(sub, min_periods=min_periods)
+        result = _ttm_events(sub, min_periods=min_periods, max_gap_days=max_ttm_span_days)
         if result.empty:
-            return pd.DataFrame(columns=["ticker", "concept", "filed", "ttm_val", "n_periods"])
+            return pd.DataFrame(columns=_empty_cols)
 
         result.insert(0, "ticker", ticker)
         result.insert(1, "concept", concept)
@@ -445,6 +705,7 @@ class PitQuery:
         tickers: list[str] | None = None,
         min_periods: int = 4,
         max_staleness_days: int | None = None,
+        max_ttm_span_days: int | None = 400,
     ) -> pd.DataFrame:
         """Trailing-twelve-month values for a full universe across one or more dates.
 
@@ -482,13 +743,20 @@ class PitQuery:
                                 predates the as_of_date by more than this many days.
                                 Default ``None`` keeps every value; ``age_days``
                                 is always returned regardless.
+            max_ttm_span_days:  maximum span (in days) between the earliest and latest
+                                of the top-4 quarter end dates. Rows whose span exceeds
+                                this threshold are silently dropped. Default 400. Pass
+                                ``None`` to disable.
 
         Returns DataFrame with columns:
-            as_of_date, ticker, ttm_val, n_periods, filed, age_days
+            as_of_date, ticker, ttm_val, n_periods, filed, age_days,
+            ttm_end_min, ttm_end_max
         """
+        self._check_concept(concept)
         if isinstance(as_of_dates, str):
             as_of_dates = [as_of_dates]
         dates = pd.DatetimeIndex(pd.to_datetime(as_of_dates)).sort_values()
+        _warn_if_future(dates)
 
         universe = tickers if tickers is not None else self.data["ticker"].unique().tolist()
 
@@ -518,7 +786,7 @@ class PitQuery:
             q4_rows = _derive_q4_rows(combined, grp_k)
             if not q4_rows.empty:
                 combined = pd.concat([combined, q4_rows], ignore_index=True).sort_values("filed")
-            events = _ttm_events(combined, min_periods=min_periods)
+            events = _ttm_events(combined, min_periods=min_periods, max_gap_days=max_ttm_span_days)
             if not events.empty:
                 events["ticker"] = ticker
                 ttm_frames.append(events)
@@ -539,8 +807,10 @@ class PitQuery:
         if not ttm_frames:
             cross[["ttm_val", "n_periods", "filed"]] = [float("nan"), 0, pd.NaT]  # type: ignore[list-item,assignment]
             cross["age_days"] = pd.array([pd.NA] * len(cross), dtype="Int64")
+            cross["ttm_end_min"] = pd.NaT
+            cross["ttm_end_max"] = pd.NaT
             return (
-                cross[["as_of_date", "ticker", "ttm_val", "n_periods", "filed", "age_days"]]
+                cross[["as_of_date", "ticker", "ttm_val", "n_periods", "filed", "age_days", "ttm_end_min", "ttm_end_max"]]
                 .sort_values(["as_of_date", "ticker"])
                 .reset_index(drop=True)
             )
@@ -551,7 +821,7 @@ class PitQuery:
         # Single vectorized lookup: merge_asof groups by ticker in one C-level pass.
         result = pd.merge_asof(
             cross,
-            all_events[["ticker", "filed", "ttm_val", "n_periods"]],
+            all_events[["ticker", "filed", "ttm_val", "n_periods", "ttm_end_min", "ttm_end_max"]],
             left_on="as_of_date",
             right_on="filed",
             by="ticker",
@@ -560,6 +830,11 @@ class PitQuery:
 
         # Always surface age_days so callers can decide what to do with stale rows.
         result["age_days"] = (result["as_of_date"] - result["filed"]).dt.days.astype("Int64")
+
+        # Normalize n_periods: merge_asof leaves NaN for tickers present in the data
+        # but with no filing on or before as_of_date. Unify with the missing-ticker
+        # filler (which uses 0) so downstream filters on n_periods behave consistently.
+        result["n_periods"] = result["n_periods"].fillna(0).astype("int64")
 
         # Only nullify when the caller opts in by passing an int.
         if max_staleness_days is not None:
@@ -576,10 +851,12 @@ class PitQuery:
             )
             filler[["ttm_val", "n_periods", "filed"]] = [float("nan"), 0, pd.NaT]  # type: ignore[list-item,assignment]
             filler["age_days"] = pd.array([pd.NA] * len(filler), dtype="Int64")
+            filler["ttm_end_min"] = pd.NaT
+            filler["ttm_end_max"] = pd.NaT
             result = pd.concat([result, filler], ignore_index=True)
 
         return (
-            result[["as_of_date", "ticker", "ttm_val", "n_periods", "filed", "age_days"]]
+            result[["as_of_date", "ticker", "ttm_val", "n_periods", "filed", "age_days", "ttm_end_min", "ttm_end_max"]]
             .sort_values(["as_of_date", "ticker"])
             .reset_index(drop=True)
         )
@@ -625,9 +902,11 @@ class PitQuery:
         Returns DataFrame with columns:
             as_of_date, ticker, val, filed, end, form, age_days
         """
+        self._check_concept(concept)
         if isinstance(as_of_dates, str):
             as_of_dates = [as_of_dates]
         dates = pd.DatetimeIndex(pd.to_datetime(as_of_dates)).sort_values()
+        _warn_if_future(dates)
 
         universe = tickers if tickers is not None else self.data["ticker"].unique().tolist()
 

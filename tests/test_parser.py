@@ -91,6 +91,7 @@ def test_parse_company_returns_correct_columns(facts_dir):
         "form",
         "accn",
         "scale_corrected",
+        "alias_source",
     }
 
 
@@ -153,14 +154,15 @@ def test_parse_company_concept_alias(tmp_path):
 
 
 def test_parse_company_scale_correction(tmp_path):
-    """Filers that report USD values in thousands (max < $1M) are auto-corrected by 1000x."""
+    """Filers that report USD values in thousands (max < $1M) are auto-corrected by 1000x
+    when scale_correction='auto' and at least 2 distinct USD concepts are below threshold."""
     facts = {
         "facts": {
             "us-gaap": {
                 "Revenues": {
                     "units": {
                         "USD": [
-                            # Values in thousands: 500_000 = $500M reported as $500
+                            # Values in thousands: 500 reported → $500k after correction
                             {
                                 "start": "2022-01-01",
                                 "end": "2022-12-31",
@@ -171,14 +173,35 @@ def test_parse_company_scale_correction(tmp_path):
                             },
                         ]
                     }
-                }
+                },
+                # Second USD concept below threshold — required for auto heuristic to fire.
+                "Assets": {
+                    "units": {
+                        "USD": [
+                            {
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 800,
+                                "form": "10-K",
+                                "accn": "S1A",
+                            },
+                        ]
+                    }
+                },
             }
         }
     }
     cik = "0000000002"
     (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
-    df = parse_company(cik, ["us-gaap:Revenues"], tmp_path, ["10-K"])
-    assert df.iloc[0]["val"] == pytest.approx(500_000)
+    df = parse_company(
+        cik,
+        ["us-gaap:Revenues", "us-gaap:Assets"],
+        tmp_path,
+        ["10-K"],
+        scale_correction="auto",
+    )
+    rev_row = df[df["concept"] == "us-gaap:Revenues"].iloc[0]
+    assert rev_row["val"] == pytest.approx(500_000)
 
 
 def test_parse_company_scale_correct_does_not_affect_shares(tmp_path):
@@ -1040,3 +1063,680 @@ def test_parse_all_invalid_n_workers(tmp_path):
     )
     with pytest.raises(ValueError, match="n_workers"):
         parse_all(config, cik_map, n_workers=0)
+
+
+# ---------------------------------------------------------------------------
+# Scale correction mode tests (Issue #12)
+# ---------------------------------------------------------------------------
+
+def _microcap_facts_single_concept():
+    """A micro-cap filer with $500k revenue — one USD concept below $1M threshold."""
+    return {
+        "facts": {
+            "us-gaap": {
+                "Revenues": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 500_000,
+                                "form": "10-K",
+                                "accn": "MC1",
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+    }
+
+
+def _microcap_facts_two_concepts():
+    """A micro-cap filer with 2 USD concepts both below $1M threshold."""
+    return {
+        "facts": {
+            "us-gaap": {
+                "Revenues": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 500_000,
+                                "form": "10-K",
+                                "accn": "MC2",
+                            },
+                        ]
+                    }
+                },
+                "Assets": {
+                    "units": {
+                        "USD": [
+                            {
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 750_000,
+                                "form": "10-K",
+                                "accn": "MC3",
+                            },
+                        ]
+                    }
+                },
+            }
+        }
+    }
+
+
+def test_microcap_not_corrected_by_default(tmp_path):
+    """Micro-cap with $500k revenue must NOT be corrected when scale_correction='off'
+    (the default), protecting legitimate small companies from silent corruption."""
+    cik = "0000111001"
+    (tmp_path / f"CIK{cik}.json").write_text(
+        json.dumps(_microcap_facts_single_concept()), encoding="utf-8"
+    )
+    df = parse_company(cik, ["us-gaap:Revenues"], tmp_path, ["10-K"])
+    # Default is "off" — value must be untouched.
+    assert df.iloc[0]["val"] == pytest.approx(500_000)
+    assert not df.iloc[0]["scale_corrected"]
+
+
+def test_microcap_auto_single_concept_not_corrected(tmp_path):
+    """With scale_correction='auto', a micro-cap with only ONE USD concept below
+    the threshold must NOT be corrected — the heuristic requires at least two."""
+    cik = "0000111002"
+    (tmp_path / f"CIK{cik}.json").write_text(
+        json.dumps(_microcap_facts_single_concept()), encoding="utf-8"
+    )
+    df = parse_company(
+        cik, ["us-gaap:Revenues"], tmp_path, ["10-K"], scale_correction="auto"
+    )
+    assert df.iloc[0]["val"] == pytest.approx(500_000)
+    assert not df.iloc[0]["scale_corrected"]
+
+
+def test_auto_two_concepts_below_threshold_corrects_and_warns(tmp_path, capsys):
+    """With scale_correction='auto' AND 2+ concepts below threshold, correction fires
+    and a visible warning is emitted (not just a debug message)."""
+    from loguru import logger
+
+    cik = "0000111003"
+    (tmp_path / f"CIK{cik}.json").write_text(
+        json.dumps(_microcap_facts_two_concepts()), encoding="utf-8"
+    )
+
+    # Capture loguru output by adding a temporary sink.
+    warning_messages: list[str] = []
+
+    def _sink(message):
+        if message.record["level"].no >= 30:  # WARNING = 30
+            warning_messages.append(str(message))
+
+    sink_id = logger.add(_sink, level="WARNING")
+    try:
+        df = parse_company(
+            cik,
+            ["us-gaap:Revenues", "us-gaap:Assets"],
+            tmp_path,
+            ["10-K"],
+            scale_correction="auto",
+        )
+    finally:
+        logger.remove(sink_id)
+
+    rev_row = df[df["concept"] == "us-gaap:Revenues"].iloc[0]
+    assert rev_row["val"] == pytest.approx(500_000 * 1000)
+    assert rev_row["scale_corrected"]
+    # A WARNING-level log entry must mention the CIK.
+    assert any(cik in msg for msg in warning_messages), (
+        f"Expected a WARNING mentioning CIK {cik}; got: {warning_messages}"
+    )
+
+
+def test_scale_correction_force_always_multiplies(tmp_path):
+    """With scale_correction='force', USD values are always multiplied ×1000
+    regardless of their magnitude."""
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "Revenues": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 5_000_000,  # already well above $1M threshold
+                                "form": "10-K",
+                                "accn": "F1",
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    cik = "0000111004"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+    df = parse_company(
+        cik, ["us-gaap:Revenues"], tmp_path, ["10-K"], scale_correction="force"
+    )
+    assert df.iloc[0]["val"] == pytest.approx(5_000_000 * 1000)
+    assert df.iloc[0]["scale_corrected"]
+
+
+def test_scale_correction_off_never_multiplies(tmp_path):
+    """With scale_correction='off', values are never multiplied even if they look
+    like thousands-reporting (only 1 concept, tiny value)."""
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "Revenues": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": 250,
+                                "form": "10-K",
+                                "accn": "O1",
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    cik = "0000111005"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+    df = parse_company(
+        cik, ["us-gaap:Revenues"], tmp_path, ["10-K"], scale_correction="off"
+    )
+    assert df.iloc[0]["val"] == pytest.approx(250)
+    assert not df.iloc[0]["scale_corrected"]
+
+
+# ---------------------------------------------------------------------------
+# C3 alias_source column / lossy aliases (issue #14)
+# ---------------------------------------------------------------------------
+
+def _profit_loss_facts(val: int = 500_000_000) -> dict:
+    return {
+        "facts": {
+            "us-gaap": {
+                "ProfitLoss": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2023-01-01",
+                                "end": "2023-12-31",
+                                "filed": "2024-02-01",
+                                "val": val,
+                                "form": "10-K",
+                                "accn": "PL1",
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+    }
+
+
+def test_lossy_alias_disabled_by_default(tmp_path):
+    cik = "0000099101"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(_profit_loss_facts()), encoding="utf-8")
+    df = parse_company(cik, ["us-gaap:NetIncomeLoss"], tmp_path, ["10-K"])
+    assert df.empty
+
+
+def test_lossy_alias_enabled_substitutes_with_marker(tmp_path):
+    from pitedgar.config import LOSSY_CONCEPT_ALIASES
+    cik = "0000099102"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(_profit_loss_facts(600_000_000)), encoding="utf-8")
+    df = parse_company(
+        cik, ["us-gaap:NetIncomeLoss"], tmp_path, ["10-K"],
+        lossy_alias_map=LOSSY_CONCEPT_ALIASES,
+    )
+    assert len(df) == 1
+    assert df.iloc[0]["concept"] == "us-gaap:NetIncomeLoss"
+    assert df.iloc[0]["alias_source"] == "us-gaap:ProfitLoss"
+    assert df.iloc[0]["val"] == pytest.approx(600_000_000)
+
+
+def test_non_lossy_alias_unmarked(tmp_path):
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "SalesRevenueNet": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2017-01-01",
+                                "end": "2017-12-31",
+                                "filed": "2018-02-15",
+                                "val": 250_000_000,
+                                "form": "10-K",
+                                "accn": "SRN1",
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    cik = "0000099103"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+    df = parse_company(cik, ["us-gaap:Revenues"], tmp_path, ["10-K"])
+    assert len(df) == 1
+    assert df.iloc[0]["concept"] == "us-gaap:Revenues"
+    assert df.iloc[0]["alias_source"] is None
+
+
+# ---------------------------------------------------------------------------
+# M1 alias priority (issue #25)
+# ---------------------------------------------------------------------------
+
+def test_alias_precedence_follows_priority_list_order(tmp_path):
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "RevenueFromContractWithCustomerExcludingAssessedTax": {
+                    "units": {
+                        "USD": [
+                            {"start": "2023-01-01", "end": "2023-12-31", "filed": "2024-02-01",
+                             "val": 111_000_000, "form": "10-K", "accn": "EXCL"},
+                        ]
+                    }
+                },
+                "SalesRevenueNet": {
+                    "units": {
+                        "USD": [
+                            {"start": "2023-01-01", "end": "2023-12-31", "filed": "2024-02-01",
+                             "val": 999_000_000, "form": "10-K", "accn": "SRN"},
+                        ]
+                    }
+                },
+            }
+        }
+    }
+    cik = "0000000200"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+    df = parse_company(cik, ["us-gaap:Revenues"], tmp_path, ["10-K"])
+    assert len(df) == 1
+    assert df.iloc[0]["val"] == pytest.approx(111_000_000)
+    assert df.iloc[0]["accn"] == "EXCL"
+
+
+def test_reversing_priority_changes_winner(tmp_path, monkeypatch):
+    import pitedgar.config as config_mod
+    import pitedgar.parser as parser_mod
+
+    reversed_priority = {
+        "us-gaap:Revenues": list(
+            reversed(config_mod.CONCEPT_ALIAS_PRIORITY["us-gaap:Revenues"])
+        ),
+    }
+    monkeypatch.setattr(config_mod, "CONCEPT_ALIAS_PRIORITY", reversed_priority)
+    monkeypatch.setattr(parser_mod, "CONCEPT_ALIAS_PRIORITY", reversed_priority)
+
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "RevenueFromContractWithCustomerExcludingAssessedTax": {
+                    "units": {
+                        "USD": [
+                            {"start": "2023-01-01", "end": "2023-12-31", "filed": "2024-02-01",
+                             "val": 111_000_000, "form": "10-K", "accn": "EXCL"},
+                        ]
+                    }
+                },
+                "SalesRevenueNet": {
+                    "units": {
+                        "USD": [
+                            {"start": "2023-01-01", "end": "2023-12-31", "filed": "2024-02-01",
+                             "val": 999_000_000, "form": "10-K", "accn": "SRN"},
+                        ]
+                    }
+                },
+            }
+        }
+    }
+    cik = "0000000201"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+    df = parse_company(cik, ["us-gaap:Revenues"], tmp_path, ["10-K"])
+    assert len(df) == 1
+    assert df.iloc[0]["val"] == pytest.approx(999_000_000)
+    assert df.iloc[0]["accn"] == "SRN"
+
+
+# ---------------------------------------------------------------------------
+# M7 is_scale_corrected helper (issue #31)
+# ---------------------------------------------------------------------------
+
+def test_is_scale_corrected_returns_boolean_series():
+    from pitedgar.parser import is_scale_corrected
+    df = pd.DataFrame({"val": [1_000_000, 2_000_000, 3_000_000], "scale_corrected": [True, False, True]})
+    result = is_scale_corrected(df)
+    assert isinstance(result, pd.Series)
+    assert result.dtype == bool
+    assert list(result) == [True, False, True]
+
+
+def test_is_scale_corrected_missing_column_returns_false_series():
+    from pitedgar.parser import is_scale_corrected
+    df = pd.DataFrame({"val": [1_000_000, 2_000_000], "concept": ["us-gaap:Revenues", "us-gaap:Assets"]})
+    result = is_scale_corrected(df)
+    assert isinstance(result, pd.Series)
+    assert result.dtype == bool
+    assert not result.any()
+
+
+def test_is_scale_corrected_exported_from_package():
+    from pitedgar.parser import is_scale_corrected as from_parser
+    import pitedgar
+    assert hasattr(pitedgar, "is_scale_corrected")
+    assert pitedgar.is_scale_corrected is from_parser
+
+
+# ---------------------------------------------------------------------------
+# C4 tolerant dedup (issue #15)
+# ---------------------------------------------------------------------------
+
+def test_dedup_tolerates_float_representation_drift(tmp_path):
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "Revenues": {
+                    "units": {
+                        "USD": [
+                            {"start": "2022-01-01", "end": "2022-12-31", "filed": "2023-02-01",
+                             "val": 1_000_000_000.0, "form": "10-K", "accn": "F1"},
+                            {"start": "2022-01-01", "end": "2022-12-31", "filed": "2024-02-01",
+                             "val": 1_000_000_000.0 + 1e-7, "form": "10-K", "accn": "F2"},
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    cik = "0001000001"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+    df = parse_company(cik, ["us-gaap:Revenues"], tmp_path, ["10-K"])
+    assert len(df) == 1
+    assert df.iloc[0]["accn"] == "F1"
+
+
+def test_dedup_preserves_cent_level_restatement(tmp_path):
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "Revenues": {
+                    "units": {
+                        "USD": [
+                            {"start": "2022-01-01", "end": "2022-12-31", "filed": "2023-02-01",
+                             "val": 1_000_000_000.00, "form": "10-K", "accn": "CR1"},
+                            {"start": "2022-01-01", "end": "2022-12-31", "filed": "2023-04-01",
+                             "val": 1_000_000_001.00, "form": "10-K", "accn": "CR2"},
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    cik = "0001000002"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+    df = parse_company(cik, ["us-gaap:Revenues"], tmp_path, ["10-K"])
+    assert len(df) == 2
+    assert set(df["accn"]) == {"CR1", "CR2"}
+
+
+def test_dedup_preserves_small_restatement_proportional(tmp_path):
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "Revenues": {
+                    "units": {
+                        "USD": [
+                            {"start": "2022-01-01", "end": "2022-12-31", "filed": "2023-02-01",
+                             "val": 1_000_000_000, "form": "10-K", "accn": "SR1"},
+                            {"start": "2022-01-01", "end": "2022-12-31", "filed": "2023-04-01",
+                             "val": 1_010_000_000, "form": "10-K", "accn": "SR2"},
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    cik = "0001000003"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+    df = parse_company(cik, ["us-gaap:Revenues"], tmp_path, ["10-K"])
+    assert len(df) == 2
+    assert set(df["accn"]) == {"SR1", "SR2"}
+
+
+def test_dedup_share_concept_tolerates_float_drift(tmp_path):
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "EarningsPerShareBasic": {
+                    "units": {
+                        "shares": [
+                            {"start": "2022-01-01", "end": "2022-12-31", "filed": "2023-02-01",
+                             "val": 5.5, "form": "10-K", "accn": "EP1"},
+                            {"start": "2022-01-01", "end": "2022-12-31", "filed": "2024-02-01",
+                             "val": 5.499999999, "form": "10-K", "accn": "EP2"},
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    cik = "0001000004"
+    (tmp_path / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+    df = parse_company(cik, ["us-gaap:EarningsPerShareBasic"], tmp_path, ["10-K"])
+    assert len(df) == 1
+    assert df.iloc[0]["accn"] == "EP1"
+
+
+# ---------------------------------------------------------------------------
+# Tests for _preferred_units helper and cross-class alias unit selection
+# ---------------------------------------------------------------------------
+
+def test_preferred_units_share_concepts_ordering():
+    """Share concepts must prefer 'shares' first; all others must prefer 'USD' first."""
+    from pitedgar.parser import _preferred_units
+
+    # Share concepts — shares must come first
+    assert _preferred_units("EarningsPerShareBasic")[0] == "shares"
+    assert _preferred_units("EarningsPerShareDiluted")[0] == "shares"
+    assert _preferred_units("CommonStockSharesOutstanding")[0] == "shares"
+
+    # Non-share concepts — USD must come first
+    assert _preferred_units("Revenues")[0] == "USD"
+    assert _preferred_units("NetIncomeLoss")[0] == "USD"
+    assert _preferred_units("SomeUnknownConcept")[0] == "USD"
+
+
+def test_unit_selection_supports_cross_class_alias(tmp_path, monkeypatch):
+    """A share-denominated alias whose canonical is a USD concept must still be
+    picked up, because units_to_try is now the union of canonical-class and
+    candidate-class preferences (canonical-class first).
+
+    We register a temporary alias  us-gaap:FakeSharesAlias -> us-gaap:Revenues
+    via monkeypatch.  The JSON fixture has FakeSharesAlias data only in 'shares'
+    units.  Without the fix the parser would look for 'USD' only (canonical class)
+    and silently skip the entry; with the fix it falls through to 'shares' and
+    picks it up.
+    """
+    import pitedgar.config as config_mod
+    import pitedgar.parser as parser_mod
+
+    # Register the cross-class alias in CONCEPT_ALIASES and CONCEPT_ALIAS_PRIORITY
+    patched_aliases = dict(config_mod.CONCEPT_ALIASES)
+    patched_aliases["us-gaap:FakeSharesAlias"] = "us-gaap:Revenues"
+    patched_priority = {
+        k: list(v) for k, v in config_mod.CONCEPT_ALIAS_PRIORITY.items()
+    }
+    patched_priority.setdefault("us-gaap:Revenues", []).append("us-gaap:FakeSharesAlias")
+    monkeypatch.setattr(config_mod, "CONCEPT_ALIASES", patched_aliases)
+    monkeypatch.setattr(parser_mod, "CONCEPT_ALIASES", patched_aliases)
+    monkeypatch.setattr(config_mod, "CONCEPT_ALIAS_PRIORITY", patched_priority)
+    monkeypatch.setattr(parser_mod, "CONCEPT_ALIAS_PRIORITY", patched_priority)
+
+    facts = {
+        "facts": {
+            "us-gaap": {
+                # Only the alias tag present, reported in 'shares' units (cross-class)
+                "FakeSharesAlias": {
+                    "units": {
+                        "shares": [
+                            {
+                                "start": "2023-01-01",
+                                "end": "2023-12-31",
+                                "filed": "2024-02-01",
+                                "val": 999_000_000,
+                                "form": "10-K",
+                                "accn": "XA1",
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    cik = "0000000200"
+    (tmp_path / f"CIK{cik}.json").write_text(__import__("json").dumps(facts), encoding="utf-8")
+
+    df = parser_mod.parse_company(cik, ["us-gaap:Revenues"], tmp_path, ["10-K"])
+    # The cross-class alias entry must be found and stored under the canonical concept
+    assert len(df) == 1
+    assert df.iloc[0]["concept"] == "us-gaap:Revenues"
+    assert df.iloc[0]["val"] == pytest.approx(999_000_000)
+    assert df.iloc[0]["accn"] == "XA1"
+
+
+def test_parse_company_share_concept_uses_shares_units_regression(facts_dir):
+    """Regression guard: CommonStockSharesOutstanding (a share concept) must still
+    resolve through 'shares' units when the canonical concept is itself a share concept.
+    The units_to_try union must not alter existing canonical-first behaviour."""
+    # Reuse the top-level fixture which has EarningsPerShareBasic in 'shares'
+    df = parse_company("0000320193", ["us-gaap:EarningsPerShareBasic"], facts_dir, ["10-K"])
+    assert len(df) == 1
+    assert df.iloc[0]["val"] == pytest.approx(5.5)
+
+
+# ---------------------------------------------------------------------------
+# Worker error isolation tests (issue #33)
+# ---------------------------------------------------------------------------
+
+def _make_single_company_facts(facts_dir, cik="0000000200", val=1_000_000_000):
+    """Write a minimal facts file for one company and return a cik_map."""
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "Revenues": {
+                    "units": {
+                        "USD": [
+                            {
+                                "start": "2022-01-01",
+                                "end": "2022-12-31",
+                                "filed": "2023-02-01",
+                                "val": val,
+                                "form": "10-K",
+                                "accn": "W1",
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    (facts_dir / f"CIK{cik}.json").write_text(json.dumps(facts), encoding="utf-8")
+    return cik
+
+
+@pytest.mark.parametrize("n_workers", [1, 2])
+def test_parse_all_worker_error_tolerant(tmp_path, n_workers):
+    """strict=False: one failing ticker must not discard successful results."""
+    facts_dir = tmp_path / "companyfacts"
+    facts_dir.mkdir()
+
+    # Two good companies + one bad one built into cik_map
+    good_cik_1 = "0000000201"
+    good_cik_2 = "0000000202"
+    bad_cik = "0000000203"
+
+    for cik, val in [(good_cik_1, 100_000_000), (good_cik_2, 200_000_000)]:
+        _make_single_company_facts(facts_dir, cik=cik, val=val)
+    # bad ticker has no JSON file, but we will make parse_company raise for it via monkeypatch
+
+    cik_map = pd.DataFrame(
+        {"cik": [good_cik_1, good_cik_2, bad_cik]},
+        index=pd.Index(["GOOD1", "GOOD2", "BAD"], name="ticker"),
+    )
+
+    config = PitEdgarConfig(
+        edgar_identity="Test test@example.com",
+        data_dir=tmp_path,
+        facts_dir=facts_dir,
+    )
+
+    import pitedgar.parser as parser_mod
+
+    original_parse_company = parser_mod.parse_company
+
+    def failing_parse_company(cik_padded, concepts, facts_dir, forms, **_kwargs):
+        if cik_padded == bad_cik:
+            raise RuntimeError("Simulated worker failure")
+        return original_parse_company(cik_padded, concepts, facts_dir, forms)
+
+    from unittest.mock import patch
+
+    with patch.object(parser_mod, "parse_company", side_effect=failing_parse_company):
+        master = parse_all(config, cik_map, strict=False, n_workers=n_workers)
+
+    # Both good companies should be present; BAD should be absent.
+    assert set(master["ticker"]) == {"GOOD1", "GOOD2"}
+    assert "BAD" not in set(master["ticker"])
+
+
+@pytest.mark.parametrize("n_workers", [1, 2])
+def test_parse_all_worker_error_strict_raises(tmp_path, n_workers):
+    """strict=True: any worker failure must raise RuntimeError mentioning failure count."""
+    facts_dir = tmp_path / "companyfacts"
+    facts_dir.mkdir()
+
+    good_cik = "0000000301"
+    bad_cik = "0000000302"
+
+    _make_single_company_facts(facts_dir, cik=good_cik, val=500_000_000)
+
+    cik_map = pd.DataFrame(
+        {"cik": [good_cik, bad_cik]},
+        index=pd.Index(["GOOD", "BAD"], name="ticker"),
+    )
+
+    config = PitEdgarConfig(
+        edgar_identity="Test test@example.com",
+        data_dir=tmp_path,
+        facts_dir=facts_dir,
+    )
+
+    import pitedgar.parser as parser_mod
+
+    original_parse_company = parser_mod.parse_company
+
+    def failing_parse_company(cik_padded, concepts, facts_dir, forms, **_kwargs):
+        if cik_padded == bad_cik:
+            raise RuntimeError("Simulated worker failure")
+        return original_parse_company(cik_padded, concepts, facts_dir, forms)
+
+    from unittest.mock import patch
+
+    with patch.object(parser_mod, "parse_company", side_effect=failing_parse_company):
+        with pytest.raises(RuntimeError, match="1 workers failed"):
+            parse_all(config, cik_map, strict=True, n_workers=n_workers)

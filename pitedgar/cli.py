@@ -11,6 +11,7 @@ from pitedgar.downloader import download_bulk
 from pitedgar.mapping import build_cik_map
 from pitedgar.parser import parse_all
 from pitedgar.query import PitQuery
+from pitedgar.util import normalize_ticker
 
 
 def _build_config(identity: str, data_dir: str) -> PitEdgarConfig:
@@ -51,7 +52,7 @@ def cmd_map(tickers_file: str, identity: str, data_dir: str, force: bool) -> Non
         raw = Path(tickers_file).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise click.ClickException(f"Cannot read tickers file {tickers_file!r}: {exc}") from exc
-    tickers = [t.strip().upper() for t in raw.splitlines() if t.strip()]
+    tickers = [normalize_ticker(t) for t in raw.splitlines() if t.strip()]
     if not tickers:
         raise click.ClickException(f"Tickers file {tickers_file!r} is empty.")
     config = _build_config(identity, data_dir)
@@ -99,7 +100,15 @@ def cmd_build(identity: str, data_dir: str, force: bool, workers: int | None) ->
 @click.option("--concept", required=True, help='e.g. "us-gaap:Revenues"')
 @click.option("--as-of", "as_of", required=True, help="ISO date, e.g. 2023-06-30")
 @click.option("--data-dir", default="./data", show_default=True)
-def cmd_query(ticker: str, concept: str, as_of: str, data_dir: str) -> None:
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["table", "json", "csv"], case_sensitive=False),
+    default="table",
+    show_default=True,
+    help="Output format.",
+)
+def cmd_query(ticker: str, concept: str, as_of: str, data_dir: str, fmt: str) -> None:
     """Query the latest PIT value for a ticker/concept as of a date."""
     parquet_path = Path(data_dir) / "pit_financials.parquet"
     _require_file(parquet_path, hint="Run `pitedgar build` first to create it.")
@@ -108,5 +117,10 @@ def cmd_query(ticker: str, concept: str, as_of: str, data_dir: str) -> None:
     except ValueError as exc:
         raise click.UsageError(f"Invalid --as-of date {as_of!r}: {exc}") from exc
     q = PitQuery(parquet_path)
-    result = q.as_of([ticker.upper()], concept, as_of_ts)
-    click.echo(result.to_string(index=False))
+    result = q.as_of([normalize_ticker(ticker)], concept, as_of_ts)
+    if fmt == "json":
+        click.echo(result.to_json(orient="records", date_format="iso", indent=2))
+    elif fmt == "csv":
+        click.echo(result.to_csv(index=False))
+    else:
+        click.echo(result.to_string(index=False))

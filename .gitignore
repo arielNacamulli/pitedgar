@@ -40,3 +40,6 @@ Thumbs.db
 
 # csv files
 *.csv
+
+# Claude Code harness state (agent worktrees, caches)
+.claude/
