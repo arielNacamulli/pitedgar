@@ -7,14 +7,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.4.0.dev0] - unreleased
+## [0.4.0] - 2026-04-25
 
-Adversarial-review hardening pass covering correctness (PIT / scale / aliases),
-security (zip-slip, zip-bomb, integrity, retry), and robustness (mapping retry,
-concept validation, contiguity checks). Individual fixes track GitHub issues
-#12–#38; each fix lands on its own `claude/v0.4/fix-<N>` sub-branch and merges
-into `claude/v0.4-adversarial-fixes`. CHANGELOG entries for each fix are added
-at integration time.
+Adversarial-review hardening pass: correctness fixes (PIT, scale, aliases),
+security hardening (zip-slip, zip-bomb, ZIP integrity, HTTP retry), and
+robustness improvements (mapping retry/rate-limit, concept validation,
+contiguity checks). 27 issues landed (#12–#38).
+
+### Changed (potentially breaking)
+- **Scale correction is opt-in** (#12): `PitEdgarConfig.scale_correction`
+  defaults to `"off"`. Pass `"auto"` for the heuristic (now requires ≥2 USD
+  concepts below `scale_correction_threshold` and emits a `WARNING`) or
+  `"force"` for unconditional ×1000. Previously legitimate micro/nano-caps
+  with revenues under $1M were silently multiplied.
+- **Lossy aliases are opt-in** (#14): `PitEdgarConfig.lossy_aliases_enabled`
+  (default `False`) gates the three financially non-equivalent aliases
+  (`ProfitLoss → NetIncomeLoss`, `LongTermDebtNoncurrent → LongTermDebt`,
+  `CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents → CashAndCashEquivalentsAtCarryingValue`).
+  When enabled the parser records the original tag in the new `alias_source` column.
+- **TTM rejects non-contiguous quarters by default** (#18): `ttm()` /
+  `ttm_cross_section()` now drop top-4 sets whose end span exceeds
+  `max_ttm_span_days=400`. Pass `None` to disable.
+
+### Added
+- `PitQuery.history(as_of=...)` (#13): explicit PIT filter; default `None`
+  preserves legacy "latest filed" behaviour with a docstring warning.
+- `PitQuery(parquet_path, tickers=, concepts=, since=)` (#24): pyarrow
+  filter pushdown to cut peak memory on R3000-scale parquets.
+- `PitQuery(strict_concepts=True)` and `q.known_concepts()` (#29): typo'd
+  concept names now warn (or raise) with `difflib` suggestions instead of
+  silently returning NaN.
+- `pitedgar.is_scale_corrected(df)` helper (#31).
+- `pitedgar.normalize_ticker(t)` helper (#37).
+- `tests/test_adversarial.py` umbrella + `pytest -m adversarial` marker (#38).
+- CLI `pitedgar query --format {table,json,csv}` (#35).
+- Adversarial fix coverage: future-date warning (#34), Q4 structural validation (#30),
+  worker error isolation in parse_all (#33).
+
+### Fixed (correctness)
+- **Float-tolerance dedup** (#15): cross-filing dedup uses `np.isclose` with
+  concept-appropriate atol (0.005 USD / 1e-6 shares) so 1-ULP serialisation
+  drift no longer breaks the "unchanged comparative re-filing" guard.
+- **Q4 derivation for 52/53-week fiscal years** (#16): prefers the 10-K's own
+  `start` when present, falls back to a 355-day window (was 366), and validates
+  monotonic ends + per-quarter gaps + Q1→Q3 span before computing.
+- **YTD synthesis O(N+M) sweep** (#17): replaces the O(N×M) cartesian product
+  on heavily-restated YTD pairs.
+- **Explicit alias priority** (#25): new `CONCEPT_ALIAS_PRIORITY` makes
+  precedence between competing aliases independent of dict insertion order.
+- **Unit selection union** (#26): `parse_company` tries canonical-class then
+  candidate-class unit preferences (defensive against future cross-class aliases).
+- **Legacy parquet `duration_days` fallback** (#27): balance-sheet concepts
+  (Assets, Liabilities, etc.) get `duration_days=-1` instead of the form-derived
+  365 so they no longer leak into `is_annual` / TTM filters.
+- **`ttm_cross_section` n_periods=0** for missing matches (#28): unifies "no
+  data ever" and "no data before as_of_date" semantics.
+
+### Fixed (security / robustness)
+- **Zip-slip protection** (#19): every ZIP member now routes through
+  `_safe_extract` which rejects absolute paths, parent-traversal, symlinks,
+  and any target resolving outside `facts_dir`.
+- **Zip-bomb cap** (#20): `_check_zip_size` rejects archives whose declared
+  decompressed size exceeds `PitEdgarConfig.max_extracted_bytes` (default 25 GiB)
+  or any single member > 10 GiB.
+- **Bulk ZIP integrity** (#21): SHA-256 + `companyfacts.zip.meta.json` sidecars
+  are written on download and verified on cache hit. Mismatch raises;
+  legacy caches without sidecar warn and proceed.
+- **Retry 429/5xx with `Retry-After`** (#22): 429/502/503/504 now retried
+  (cap 5 min total wait) instead of propagating immediately.
+- **`build_cik_map` retry + adaptive rate limit** (#23): per-call latency is
+  measured to keep ≥105 ms between requests (well under SEC's 10 req/s cap);
+  `AttributeError` / `KeyError` no longer silently swallowed (3 consecutive
+  raises a schema-drift `RuntimeError`).
+- **Worker error isolation** (#33): a per-worker exception in `parse_all` no
+  longer discards results from already-completed workers; pass `strict=True`
+  for the previous fail-fast behaviour.
+- **`edgar_identity` regex validation** (#32): rejects malformed strings up
+  front to avoid SEC IP bans.
+- **CIK range validation** (#36): `build_cik_map` skips and warns on negative
+  or oversized CIKs instead of writing 11-char padded strings.
+
+### Tooling
+- 229 tests (was 122 on master); regression coverage doubled.
+- Adversarial test suite runnable in isolation: `pytest -m adversarial`.
 
 ## [0.3.2] - 2026-04-21
 
