@@ -14,6 +14,7 @@ from tqdm import tqdm
 
 from pitedgar.config import PitEdgarConfig
 
+
 def _safe_extract(zf: ZipFile, member_info: ZipInfo, dest: Path) -> None:
     """Extract a single ZIP member to *dest* after validating against zip-slip attacks.
 

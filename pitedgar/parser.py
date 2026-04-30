@@ -235,23 +235,22 @@ def parse_company(
             logger.debug(
                 f"CIK {cik_padded}: force scale correction applied to {int(usd_mask.sum())} USD rows"
             )
-    elif scale_correction == "auto":
-        if usd_mask.any():
-            usd_df = df.loc[usd_mask]
-            concepts_below = (
-                usd_df.groupby("concept")["val"]
-                .apply(lambda s: s.abs().max() < scale_correction_threshold)
+    elif scale_correction == "auto" and usd_mask.any():
+        usd_df = df.loc[usd_mask]
+        concepts_below = (
+            usd_df.groupby("concept")["val"]
+            .apply(lambda s: s.abs().max() < scale_correction_threshold)
+        )
+        n_below = int(concepts_below.sum())
+        if n_below >= 2:
+            max_val = usd_df["val"].abs().max()
+            df.loc[usd_mask, "val"] *= 1000
+            df.loc[usd_mask, "scale_corrected"] = True
+            logger.warning(
+                f"CIK {cik_padded}: auto scale correction applied "
+                f"({n_below} USD concepts below threshold; "
+                f"max_val={max_val:.2f}, threshold={scale_correction_threshold:.0f})"
             )
-            n_below = int(concepts_below.sum())
-            if n_below >= 2:
-                max_val = usd_df["val"].abs().max()
-                df.loc[usd_mask, "val"] *= 1000
-                df.loc[usd_mask, "scale_corrected"] = True
-                logger.warning(
-                    f"CIK {cik_padded}: auto scale correction applied "
-                    f"({n_below} USD concepts below threshold; "
-                    f"max_val={max_val:.2f}, threshold={scale_correction_threshold:.0f})"
-                )
     # scale_correction == "off": do nothing
 
     df["duration_days"] = (df["end"] - df["start"]).dt.days.where(df["start"].notna(), -1)

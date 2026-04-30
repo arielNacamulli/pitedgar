@@ -14,10 +14,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from pitedgar.config import PitEdgarConfig
 from pitedgar.parser import parse_company
 from pitedgar.query import PitQuery
-
 
 pytestmark = pytest.mark.adversarial
 

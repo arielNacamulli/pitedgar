@@ -1,6 +1,5 @@
 """Tests for mapping.py"""
 
-import logging
 from unittest.mock import MagicMock, patch
 
 import pytest

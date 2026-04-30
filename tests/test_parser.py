@@ -1436,8 +1436,8 @@ def test_is_scale_corrected_missing_column_returns_false_series():
 
 
 def test_is_scale_corrected_exported_from_package():
-    from pitedgar.parser import is_scale_corrected as from_parser
     import pitedgar
+    from pitedgar.parser import is_scale_corrected as from_parser
     assert hasattr(pitedgar, "is_scale_corrected")
     assert pitedgar.is_scale_corrected is from_parser
 
@@ -1737,6 +1737,8 @@ def test_parse_all_worker_error_strict_raises(tmp_path, n_workers):
 
     from unittest.mock import patch
 
-    with patch.object(parser_mod, "parse_company", side_effect=failing_parse_company):
-        with pytest.raises(RuntimeError, match="1 workers failed"):
-            parse_all(config, cik_map, strict=True, n_workers=n_workers)
+    with (
+        patch.object(parser_mod, "parse_company", side_effect=failing_parse_company),
+        pytest.raises(RuntimeError, match="1 workers failed"),
+    ):
+        parse_all(config, cik_map, strict=True, n_workers=n_workers)
