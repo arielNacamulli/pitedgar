@@ -9,7 +9,7 @@ import pytest
 import requests
 
 from pitedgar.config import PitEdgarConfig
-from pitedgar.downloader import download_bulk
+from pitedgar.downloader import _check_zip_size, _safe_extract, download_bulk
 
 
 @pytest.fixture
@@ -204,6 +204,7 @@ def test_non_retryable_error_propagates_immediately(config):
 # SHA-256 sidecar / integrity tests
 # ---------------------------------------------------------------------------
 
+
 def _make_streaming_response_with_meta(payload: bytes) -> MagicMock:
     """Build a mock streaming response that includes ETag / Last-Modified headers."""
     resp = MagicMock()
@@ -290,7 +291,7 @@ def test_cache_hit_rejects_corrupted_zip(config):
     zip_path.write_bytes(bytes(data))
 
     # Second run must raise RuntimeError mentioning SHA-256 mismatch.
-    with pytest.raises(RuntimeError, match="(?i)sha.?256"):
+    with pytest.raises(RuntimeError, match=r"(?i)sha.?256"):
         download_bulk(config, force=False)
 
 
@@ -329,17 +330,15 @@ def test_cache_hit_without_sidecar_warns_and_proceeds(config):
     finally:
         loguru_logger.remove(sink_id)
 
-    assert any(
-        "sidecar" in str(m).lower() or "sha-256" in str(m).lower()
-        for m in captured
-    ), "Expected a loguru WARNING about the missing SHA-256 sidecar"
-from pathlib import Path
-from pitedgar.downloader import _safe_extract, download_bulk
+    assert any("sidecar" in str(m).lower() or "sha-256" in str(m).lower() for m in captured), (
+        "Expected a loguru WARNING about the missing SHA-256 sidecar"
+    )
 
 
 # ---------------------------------------------------------------------------
 # Zip-slip security tests
 # ---------------------------------------------------------------------------
+
 
 def _make_zip_with_member(path, member_name: str, content: bytes = b"{}") -> None:
     """Write a ZIP at *path* containing a single member with the given name."""
@@ -353,9 +352,11 @@ def test_extraction_rejects_parent_traversal(config, tmp_path):
     _make_zip_with_member(zip_path, "../evil.json")
     config.facts_dir.mkdir(parents=True, exist_ok=True)
 
-    with patch("pitedgar.downloader.requests.get"):
-        with pytest.raises(RuntimeError, match="Unsafe zip member path"):
-            download_bulk(config, force=False)
+    with (
+        patch("pitedgar.downloader.requests.get"),
+        pytest.raises(RuntimeError, match="Unsafe zip member path"),
+    ):
+        download_bulk(config, force=False)
 
 
 def test_extraction_rejects_absolute_path(config, tmp_path):
@@ -364,9 +365,11 @@ def test_extraction_rejects_absolute_path(config, tmp_path):
     _make_zip_with_member(zip_path, "/tmp/evil.json")
     config.facts_dir.mkdir(parents=True, exist_ok=True)
 
-    with patch("pitedgar.downloader.requests.get"):
-        with pytest.raises(RuntimeError, match="Unsafe zip member path"):
-            download_bulk(config, force=False)
+    with (
+        patch("pitedgar.downloader.requests.get"),
+        pytest.raises(RuntimeError, match="Unsafe zip member path"),
+    ):
+        download_bulk(config, force=False)
 
 
 def test_extraction_rejects_symlink_entry(tmp_path):
@@ -375,7 +378,6 @@ def test_extraction_rejects_symlink_entry(tmp_path):
     zip_path = tmp_path / "test.zip"
     with zipfile.ZipFile(zip_path, "w") as zf:
         zf.writestr("link_target.json", "{}")
-        info = zf.infolist()[0]
 
     # Fabricate a symlink ZipInfo: set S_IFLNK (0xA000) in the upper 16 bits.
     symlink_info = zipfile.ZipInfo(filename="link.json")
@@ -384,9 +386,11 @@ def test_extraction_rejects_symlink_entry(tmp_path):
     dest = tmp_path / "dest"
     dest.mkdir()
 
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        with pytest.raises(RuntimeError, match="Unsafe zip member path"):
-            _safe_extract(zf, symlink_info, dest)
+    with (
+        zipfile.ZipFile(zip_path, "r") as zf,
+        pytest.raises(RuntimeError, match="Unsafe zip member path"),
+    ):
+        _safe_extract(zf, symlink_info, dest)
 
 
 def test_extraction_accepts_legitimate_nested_path(config):
@@ -399,7 +403,6 @@ def test_extraction_accepts_legitimate_nested_path(config):
         result = download_bulk(config, force=False)
 
     assert (result / "subdir" / "file.json").exists()
-from pitedgar.downloader import _check_zip_size, download_bulk
 
 
 # ---------------------------------------------------------------------------
@@ -444,8 +447,10 @@ def test_extraction_rejects_huge_single_file():
     """A single member declaring > 10 GiB raises RuntimeError regardless of total cap."""
     huge = 11 * 1024**3  # 11 GiB > 10 GiB single-file limit
     zf = _make_mock_zip_with_sizes([huge])
-    with pytest.raises(RuntimeError, match="Zip decompressed size|single-file cap"):
+    with pytest.raises(RuntimeError, match=r"Zip decompressed size|single-file cap"):
         _check_zip_size(zf, limit=100 * 1024**3)  # generous total cap
+
+
 def _make_http_error(status_code: int, headers: dict | None = None) -> requests.HTTPError:
     """Build a requests.HTTPError with a real-ish response for *status_code*."""
     http_resp = MagicMock()
@@ -453,11 +458,6 @@ def _make_http_error(status_code: int, headers: dict | None = None) -> requests.
     http_resp.headers = headers or {}
     err = requests.HTTPError(str(status_code), response=http_resp)
     return err
-
-
-    """HTTPError with a non-retryable status (404) should surface on the first call."""
-    resp.raise_for_status = MagicMock(side_effect=_make_http_error(404))
-    assert mock_get.call_count == 1
 
 
 def test_404_still_non_retryable(config):
@@ -543,12 +543,10 @@ def test_total_wait_cap_aborts_retries(config):
     resp = MagicMock()
     resp.__enter__ = lambda s: s
     resp.__exit__ = MagicMock(return_value=False)
-    resp.raise_for_status = MagicMock(
-        side_effect=_make_http_error(429, headers={"Retry-After": "500"})
-    )
+    resp.raise_for_status = MagicMock(side_effect=_make_http_error(429, headers={"Retry-After": "500"}))
 
     with (
-        patch("pitedgar.downloader.requests.get", return_value=resp) as mock_get,
+        patch("pitedgar.downloader.requests.get", return_value=resp),
         patch("pitedgar.downloader.time.sleep") as mock_sleep,
         pytest.raises(requests.HTTPError),
     ):

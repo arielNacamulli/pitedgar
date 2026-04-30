@@ -6,9 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, model_validator
 
-_EDGAR_IDENTITY_RE = re.compile(
-    r"^[\w.\-']+(?:\s+[\w.\-']+)*\s+[\w.+\-]+@[\w.\-]+\.[a-zA-Z]{2,}\s*$"
-)
+_EDGAR_IDENTITY_RE = re.compile(r"^[\w.\-']+(?:\s+[\w.\-']+)*\s+[\w.+\-]+@[\w.\-]+\.[a-zA-Z]{2,}\s*$")
 
 DEFAULT_CONCEPTS = [
     "us-gaap:Revenues",
@@ -59,9 +57,7 @@ CONCEPT_ALIAS_PRIORITY: dict[str, list[str]] = {
 # Derived from CONCEPT_ALIAS_PRIORITY so the public API remains stable and the parser
 # priority order no longer depends on Python dict insertion order.
 CONCEPT_ALIASES: dict[str, str] = {
-    alias: canonical
-    for canonical, aliases in CONCEPT_ALIAS_PRIORITY.items()
-    for alias in aliases
+    alias: canonical for canonical, aliases in CONCEPT_ALIAS_PRIORITY.items() for alias in aliases
 }
 
 # Aliases that are financially NON-EQUIVALENT to their canonical targets.

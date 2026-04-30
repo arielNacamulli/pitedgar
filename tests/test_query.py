@@ -2,7 +2,10 @@
 
 import pandas as pd
 import pytest
+from loguru import logger
 
+import pitedgar.query as _query_module
+from pitedgar.periods import is_annual
 from pitedgar.query import PitQuery, _derive_quarterly_from_ytd
 
 CONCEPT = "us-gaap:Revenues"
@@ -1470,16 +1473,51 @@ def test_ttm_cross_section_matches_ttm_on_ytd_universe(tmp_path):
 def multi_ticker_parquet(tmp_path):
     """Parquet with AAPL, MSFT, and two concepts for filter tests."""
     records = [
-        {"ticker": "AAPL", "concept": "us-gaap:Revenues", "end": "2022-12-31",
-         "filed": "2023-02-02", "val": 394328000000.0, "form": "10-K", "accn": "A1"},
-        {"ticker": "AAPL", "concept": "us-gaap:Assets", "end": "2022-12-31",
-         "filed": "2023-02-02", "val": 352755000000.0, "form": "10-K", "accn": "A2"},
-        {"ticker": "MSFT", "concept": "us-gaap:Revenues", "end": "2022-06-30",
-         "filed": "2022-07-28", "val": 198270000000.0, "form": "10-K", "accn": "B1"},
-        {"ticker": "MSFT", "concept": "us-gaap:Assets", "end": "2022-06-30",
-         "filed": "2022-07-28", "val": 364840000000.0, "form": "10-K", "accn": "B2"},
-        {"ticker": "AAPL", "concept": "us-gaap:Revenues", "end": "2021-12-31",
-         "filed": "2022-01-28", "val": 365817000000.0, "form": "10-K", "accn": "A0"},
+        {
+            "ticker": "AAPL",
+            "concept": "us-gaap:Revenues",
+            "end": "2022-12-31",
+            "filed": "2023-02-02",
+            "val": 394328000000.0,
+            "form": "10-K",
+            "accn": "A1",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": "us-gaap:Assets",
+            "end": "2022-12-31",
+            "filed": "2023-02-02",
+            "val": 352755000000.0,
+            "form": "10-K",
+            "accn": "A2",
+        },
+        {
+            "ticker": "MSFT",
+            "concept": "us-gaap:Revenues",
+            "end": "2022-06-30",
+            "filed": "2022-07-28",
+            "val": 198270000000.0,
+            "form": "10-K",
+            "accn": "B1",
+        },
+        {
+            "ticker": "MSFT",
+            "concept": "us-gaap:Assets",
+            "end": "2022-06-30",
+            "filed": "2022-07-28",
+            "val": 364840000000.0,
+            "form": "10-K",
+            "accn": "B2",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": "us-gaap:Revenues",
+            "end": "2021-12-31",
+            "filed": "2022-01-28",
+            "val": 365817000000.0,
+            "form": "10-K",
+            "accn": "A0",
+        },
     ]
     df = pd.DataFrame(records)
     path = tmp_path / "pit_financials.parquet"
@@ -1572,6 +1610,8 @@ def test_init_without_filters_is_backwards_compatible(multi_ticker_parquet):
     assert set(q.data["ticker"].unique()) == {"AAPL", "MSFT"}
     assert set(q.data["concept"].unique()) == {"us-gaap:Revenues", "us-gaap:Assets"}
     assert len(q.data) == 5
+
+
 def test_known_concepts_returns_sorted_list(concept_check_parquet):
     """known_concepts() returns a sorted list of all unique concept strings."""
     q = PitQuery(concept_check_parquet)
@@ -1583,7 +1623,6 @@ def test_known_concepts_returns_sorted_list(concept_check_parquet):
 
 def test_unknown_concept_warns_and_suggests(concept_check_parquet):
     """Typo'd concept emits a loguru warning mentioning a near-match suggestion."""
-    import sys
     from loguru import logger
 
     q = PitQuery(concept_check_parquet)
@@ -1656,6 +1695,8 @@ def test_unknown_concept_warns_independently_per_new_instance(concept_check_parq
     # unrelated legacy-parquet warnings from the duration_days fallback).
     concept_warnings = [w for w in warnings if "Unknown concept" in w]
     assert len(concept_warnings) == 2
+
+
 # Issue #17: O(N+M) YTD synthesis — no cartesian product on restatement
 # ---------------------------------------------------------------------------
 
@@ -1865,7 +1906,6 @@ def test_derive_q4_rejects_52_week_cross_year_q4(tmp_path):
     are found and Q4 is correctly derived.
     """
     # Previous FY: 2022-01-30 → 2023-01-28 (364 days)
-    prev_fy_end = pd.Timestamp("2023-01-28")
     # Current FY: 2023-01-29 → 2024-02-03 (371 days, 53-week)
     curr_fy_start = pd.Timestamp("2023-01-29")
     curr_fy_end = pd.Timestamp("2024-02-03")
@@ -1977,19 +2017,10 @@ def test_derive_q4_rejects_non_monotonic_ends(tmp_path):
             "start": pd.to_datetime(["2023-01-01"]),
         }
     )
-    result = _derive_q4_rows(df_q, df_k)
+    _derive_q4_rows(df_q, df_k)
     # The 3 quarters have non-monotonic ends after sort: 03-31, 06-30, 09-30 — that's
     # actually monotonic.  To force non-monotonic we need two with the same value or
-    # reversed.  Rebuild with Q1 > Q2.
-    df_q2 = pd.DataFrame(
-        {
-            "end": pd.to_datetime(["2023-06-30", "2023-04-30", "2023-09-30"]),
-            "filed": pd.to_datetime(["2023-07-28", "2023-05-28", "2023-10-28"]),
-            "val": [200.0, 100.0, 300.0],
-        }
-    )
-    # All three are distinct and after sort: 04-30, 06-30, 09-30 — monotonic, so
-    # let's create a case where two ends are equal (duplicates collapse to 2 rows → != 3).
+    # reversed.  Create a case where two ends are equal (duplicates collapse to 2 rows → != 3).
     df_q3 = pd.DataFrame(
         {
             "end": pd.to_datetime(["2023-03-31", "2023-03-31", "2023-09-30"]),
@@ -2302,7 +2333,6 @@ def test_ttm_cross_section_exposes_end_min_max_columns(ttm_parquet_path):
     row = result.iloc[0]
     assert row["ttm_end_min"] == pd.Timestamp("2022-03-26")
     assert row["ttm_end_max"] == pd.Timestamp("2022-12-31")
-from pitedgar.periods import is_annual
 
 
 # ---------------------------------------------------------------------------
@@ -2336,9 +2366,7 @@ def test_legacy_parquet_balance_sheet_not_annual(tmp_path):
     """Assets in a 10-K legacy parquet must NOT be classified as annual (is_annual=False)."""
     q = _legacy_parquet(tmp_path, "us-gaap:Assets")
     row = q.data.iloc[0]
-    assert not is_annual(
-        pd.Series([row["duration_days"]]), pd.Series([row["form"]])
-    ).iloc[0]
+    assert not is_annual(pd.Series([row["duration_days"]]), pd.Series([row["form"]])).iloc[0]
 
 
 def test_legacy_parquet_revenues_still_annual(tmp_path):
@@ -2346,9 +2374,7 @@ def test_legacy_parquet_revenues_still_annual(tmp_path):
     q = _legacy_parquet(tmp_path, "us-gaap:Revenues")
     row = q.data.iloc[0]
     assert int(row["duration_days"]) == 365
-    assert is_annual(
-        pd.Series([row["duration_days"]]), pd.Series([row["form"]])
-    ).iloc[0]
+    assert is_annual(pd.Series([row["duration_days"]]), pd.Series([row["form"]])).iloc[0]
 
 
 def test_legacy_parquet_with_start_uses_real_duration(tmp_path):
@@ -2391,11 +2417,7 @@ def test_legacy_parquet_warns_once(tmp_path):
     finally:
         logger.remove(handler_id)
 
-    assert any("duration_days" in m for m in captured), (
-        f"Expected a duration_days warning, got: {captured}"
-    )
-from loguru import logger
-import pitedgar.query as _query_module
+    assert any("duration_days" in m for m in captured), f"Expected a duration_days warning, got: {captured}"
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 """Step 1: resolve ticker → CIK via edgartools."""
 
 import time
+from typing import Any
 
 import edgar
 import pandas as pd
@@ -17,13 +18,13 @@ from pitedgar.util import normalize_ticker
 # starts raising those for valid tickers it likely indicates schema drift in
 # the library. We surface that via the consecutive-error guard below rather
 # than silently skipping tickers.
-_TICKER_LOOKUP_SKIPPABLE: tuple[type[BaseException], ...] = (
+_TICKER_LOOKUP_SKIPPABLE: tuple[type[Exception], ...] = (
     ValueError,
     LookupError,
 )
 
 # Exceptions that indicate a transient network problem worth retrying.
-_TRANSIENT_EXCEPTIONS: tuple[type[BaseException], ...] = (
+_TRANSIENT_EXCEPTIONS: tuple[type[Exception], ...] = (
     ConnectionError,
     TimeoutError,
 )
@@ -34,7 +35,7 @@ _CONSECUTIVE_SCHEMA_ERRORS_LIMIT = 3
 _HIGH_FAILURE_RATE_THRESHOLD = 0.20  # 20 %
 
 
-def _fetch_company_with_retry(ticker: str) -> object:
+def _fetch_company_with_retry(ticker: str) -> Any:
     """Call ``edgar.Company(ticker)`` with up to *_MAX_RETRIES* retries.
 
     Retries on :class:`ConnectionError` / :class:`TimeoutError` with
@@ -47,7 +48,7 @@ def _fetch_company_with_retry(ticker: str) -> object:
             return edgar.Company(ticker)
         except _TRANSIENT_EXCEPTIONS as exc:
             last_exc = exc
-            backoff = 2 ** attempt
+            backoff = 2**attempt
             logger.warning(
                 f"Transient error for '{ticker}' (attempt {attempt + 1}/{_MAX_RETRIES}): "
                 f"{exc!r}. Retrying in {backoff}s…"
@@ -133,8 +134,7 @@ def build_cik_map(tickers: list[str], config: PitEdgarConfig, force: bool = Fals
         except (AttributeError, KeyError) as exc:
             consecutive_schema_errors += 1
             logger.warning(
-                f"Schema-like error for '{ticker}' "
-                f"({consecutive_schema_errors} consecutive): {exc!r}"
+                f"Schema-like error for '{ticker}' ({consecutive_schema_errors} consecutive): {exc!r}"
             )
             failed_count += 1
             if consecutive_schema_errors >= _CONSECUTIVE_SCHEMA_ERRORS_LIMIT:

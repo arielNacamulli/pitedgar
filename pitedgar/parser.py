@@ -129,9 +129,7 @@ def parse_company(
     # Build reverse alias map: canonical -> [alias, ...] in explicit priority order.
     # CONCEPT_ALIAS_PRIORITY is the source of truth for non-lossy ordering;
     # lossy aliases (when enabled) are appended after the priority-ordered aliases.
-    alias_lookup: dict[str, list[str]] = {
-        c: list(CONCEPT_ALIAS_PRIORITY.get(c, [])) for c in concepts
-    }
+    alias_lookup: dict[str, list[str]] = {c: list(CONCEPT_ALIAS_PRIORITY.get(c, [])) for c in concepts}
     # Append lossy alias candidates to the lookup for canonicals that have them,
     # so the candidate loop picks them up when lossy_alias_map is non-empty.
     for lossy_alias, canonical in effective_lossy_map.items():
@@ -235,23 +233,21 @@ def parse_company(
             logger.debug(
                 f"CIK {cik_padded}: force scale correction applied to {int(usd_mask.sum())} USD rows"
             )
-    elif scale_correction == "auto":
-        if usd_mask.any():
-            usd_df = df.loc[usd_mask]
-            concepts_below = (
-                usd_df.groupby("concept")["val"]
-                .apply(lambda s: s.abs().max() < scale_correction_threshold)
+    elif scale_correction == "auto" and usd_mask.any():
+        usd_df = df.loc[usd_mask]
+        concepts_below = usd_df.groupby("concept")["val"].apply(
+            lambda s: s.abs().max() < scale_correction_threshold
+        )
+        n_below = int(concepts_below.sum())
+        if n_below >= 2:
+            max_val = usd_df["val"].abs().max()
+            df.loc[usd_mask, "val"] *= 1000
+            df.loc[usd_mask, "scale_corrected"] = True
+            logger.warning(
+                f"CIK {cik_padded}: auto scale correction applied "
+                f"({n_below} USD concepts below threshold; "
+                f"max_val={max_val:.2f}, threshold={scale_correction_threshold:.0f})"
             )
-            n_below = int(concepts_below.sum())
-            if n_below >= 2:
-                max_val = usd_df["val"].abs().max()
-                df.loc[usd_mask, "val"] *= 1000
-                df.loc[usd_mask, "scale_corrected"] = True
-                logger.warning(
-                    f"CIK {cik_padded}: auto scale correction applied "
-                    f"({n_below} USD concepts below threshold; "
-                    f"max_val={max_val:.2f}, threshold={scale_correction_threshold:.0f})"
-                )
     # scale_correction == "off": do nothing
 
     df["duration_days"] = (df["end"] - df["start"]).dt.days.where(df["start"].notna(), -1)
@@ -273,15 +269,28 @@ def parse_company(
 
 def _parse_one_for_pool(
     args: tuple[
-        str, str, list[str] | None, Path, list[str], str, float,
-        dict[str, str], dict[str, str],
+        str,
+        str,
+        list[str] | None,
+        Path,
+        list[str],
+        str,
+        float,
+        dict[str, str],
+        dict[str, str],
     ],
 ) -> tuple[str, pd.DataFrame]:
     """Top-level helper for ProcessPoolExecutor (must be picklable)."""
     (
-        ticker, cik_padded, concepts, facts_dir, forms,
-        scale_correction, scale_correction_threshold,
-        alias_map, lossy_alias_map,
+        ticker,
+        cik_padded,
+        concepts,
+        facts_dir,
+        forms,
+        scale_correction,
+        scale_correction_threshold,
+        alias_map,
+        lossy_alias_map,
     ) = args
     df = parse_company(
         cik_padded=cik_padded,
@@ -321,9 +330,7 @@ def parse_all(
     if n_workers < 1:
         raise ValueError(f"n_workers must be >= 1, got {n_workers}")
 
-    effective_lossy_map: dict[str, str] = (
-        LOSSY_CONCEPT_ALIASES if config.lossy_aliases_enabled else {}
-    )
+    effective_lossy_map: dict[str, str] = LOSSY_CONCEPT_ALIASES if config.lossy_aliases_enabled else {}
 
     all_frames: list[pd.DataFrame] = []
     errors: list[tuple[str, BaseException]] = []
