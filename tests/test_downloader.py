@@ -204,6 +204,7 @@ def test_non_retryable_error_propagates_immediately(config):
 # SHA-256 sidecar / integrity tests
 # ---------------------------------------------------------------------------
 
+
 def _make_streaming_response_with_meta(payload: bytes) -> MagicMock:
     """Build a mock streaming response that includes ETag / Last-Modified headers."""
     resp = MagicMock()
@@ -329,15 +330,15 @@ def test_cache_hit_without_sidecar_warns_and_proceeds(config):
     finally:
         loguru_logger.remove(sink_id)
 
-    assert any(
-        "sidecar" in str(m).lower() or "sha-256" in str(m).lower()
-        for m in captured
-    ), "Expected a loguru WARNING about the missing SHA-256 sidecar"
+    assert any("sidecar" in str(m).lower() or "sha-256" in str(m).lower() for m in captured), (
+        "Expected a loguru WARNING about the missing SHA-256 sidecar"
+    )
 
 
 # ---------------------------------------------------------------------------
 # Zip-slip security tests
 # ---------------------------------------------------------------------------
+
 
 def _make_zip_with_member(path, member_name: str, content: bytes = b"{}") -> None:
     """Write a ZIP at *path* containing a single member with the given name."""
@@ -542,9 +543,7 @@ def test_total_wait_cap_aborts_retries(config):
     resp = MagicMock()
     resp.__enter__ = lambda s: s
     resp.__exit__ = MagicMock(return_value=False)
-    resp.raise_for_status = MagicMock(
-        side_effect=_make_http_error(429, headers={"Retry-After": "500"})
-    )
+    resp.raise_for_status = MagicMock(side_effect=_make_http_error(429, headers={"Retry-After": "500"}))
 
     with (
         patch("pitedgar.downloader.requests.get", return_value=resp),

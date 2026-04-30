@@ -6,6 +6,7 @@ belong to any single parser/query/downloader unit test. Per-fix tests
 still live in the respective module's test file; entries here are the
 minimum-viable smoke tests that must survive any future refactor.
 """
+
 from __future__ import annotations
 
 import json

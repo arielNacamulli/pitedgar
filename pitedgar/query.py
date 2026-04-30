@@ -425,9 +425,7 @@ class PitQuery:
         # Ensure duration_days exists for period classification. The parser always
         # writes this column; for legacy parquets without it, infer heuristically.
         if "duration_days" not in self.data.columns:
-            has_start = (
-                "start" in self.data.columns and self.data["start"].notna().any()
-            )
+            has_start = "start" in self.data.columns and self.data["start"].notna().any()
             if has_start:
                 self.data["duration_days"] = (
                     (self.data["end"] - self.data["start"]).dt.days.fillna(-1).astype(int)
@@ -459,8 +457,7 @@ class PitQuery:
         suggestions = difflib.get_close_matches(concept, self._known_concepts, n=3, cutoff=0.6)
         if self.strict_concepts:
             raise KeyError(
-                f"Unknown concept {concept!r}. "
-                f"Nearest: {suggestions}. See q.known_concepts() for available."
+                f"Unknown concept {concept!r}. Nearest: {suggestions}. See q.known_concepts() for available."
             )
         if concept not in self._warned_concepts:
             self._warned_concepts.add(concept)
@@ -810,7 +807,18 @@ class PitQuery:
             cross["ttm_end_min"] = pd.NaT
             cross["ttm_end_max"] = pd.NaT
             return (
-                cross[["as_of_date", "ticker", "ttm_val", "n_periods", "filed", "age_days", "ttm_end_min", "ttm_end_max"]]
+                cross[
+                    [
+                        "as_of_date",
+                        "ticker",
+                        "ttm_val",
+                        "n_periods",
+                        "filed",
+                        "age_days",
+                        "ttm_end_min",
+                        "ttm_end_max",
+                    ]
+                ]
                 .sort_values(["as_of_date", "ticker"])
                 .reset_index(drop=True)
             )
@@ -856,7 +864,18 @@ class PitQuery:
             result = pd.concat([result, filler], ignore_index=True)
 
         return (
-            result[["as_of_date", "ticker", "ttm_val", "n_periods", "filed", "age_days", "ttm_end_min", "ttm_end_max"]]
+            result[
+                [
+                    "as_of_date",
+                    "ticker",
+                    "ttm_val",
+                    "n_periods",
+                    "filed",
+                    "age_days",
+                    "ttm_end_min",
+                    "ttm_end_max",
+                ]
+            ]
             .sort_values(["as_of_date", "ticker"])
             .reset_index(drop=True)
         )

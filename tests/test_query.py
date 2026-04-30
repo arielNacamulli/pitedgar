@@ -1473,16 +1473,51 @@ def test_ttm_cross_section_matches_ttm_on_ytd_universe(tmp_path):
 def multi_ticker_parquet(tmp_path):
     """Parquet with AAPL, MSFT, and two concepts for filter tests."""
     records = [
-        {"ticker": "AAPL", "concept": "us-gaap:Revenues", "end": "2022-12-31",
-         "filed": "2023-02-02", "val": 394328000000.0, "form": "10-K", "accn": "A1"},
-        {"ticker": "AAPL", "concept": "us-gaap:Assets", "end": "2022-12-31",
-         "filed": "2023-02-02", "val": 352755000000.0, "form": "10-K", "accn": "A2"},
-        {"ticker": "MSFT", "concept": "us-gaap:Revenues", "end": "2022-06-30",
-         "filed": "2022-07-28", "val": 198270000000.0, "form": "10-K", "accn": "B1"},
-        {"ticker": "MSFT", "concept": "us-gaap:Assets", "end": "2022-06-30",
-         "filed": "2022-07-28", "val": 364840000000.0, "form": "10-K", "accn": "B2"},
-        {"ticker": "AAPL", "concept": "us-gaap:Revenues", "end": "2021-12-31",
-         "filed": "2022-01-28", "val": 365817000000.0, "form": "10-K", "accn": "A0"},
+        {
+            "ticker": "AAPL",
+            "concept": "us-gaap:Revenues",
+            "end": "2022-12-31",
+            "filed": "2023-02-02",
+            "val": 394328000000.0,
+            "form": "10-K",
+            "accn": "A1",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": "us-gaap:Assets",
+            "end": "2022-12-31",
+            "filed": "2023-02-02",
+            "val": 352755000000.0,
+            "form": "10-K",
+            "accn": "A2",
+        },
+        {
+            "ticker": "MSFT",
+            "concept": "us-gaap:Revenues",
+            "end": "2022-06-30",
+            "filed": "2022-07-28",
+            "val": 198270000000.0,
+            "form": "10-K",
+            "accn": "B1",
+        },
+        {
+            "ticker": "MSFT",
+            "concept": "us-gaap:Assets",
+            "end": "2022-06-30",
+            "filed": "2022-07-28",
+            "val": 364840000000.0,
+            "form": "10-K",
+            "accn": "B2",
+        },
+        {
+            "ticker": "AAPL",
+            "concept": "us-gaap:Revenues",
+            "end": "2021-12-31",
+            "filed": "2022-01-28",
+            "val": 365817000000.0,
+            "form": "10-K",
+            "accn": "A0",
+        },
     ]
     df = pd.DataFrame(records)
     path = tmp_path / "pit_financials.parquet"
@@ -1575,6 +1610,8 @@ def test_init_without_filters_is_backwards_compatible(multi_ticker_parquet):
     assert set(q.data["ticker"].unique()) == {"AAPL", "MSFT"}
     assert set(q.data["concept"].unique()) == {"us-gaap:Revenues", "us-gaap:Assets"}
     assert len(q.data) == 5
+
+
 def test_known_concepts_returns_sorted_list(concept_check_parquet):
     """known_concepts() returns a sorted list of all unique concept strings."""
     q = PitQuery(concept_check_parquet)
@@ -1658,6 +1695,8 @@ def test_unknown_concept_warns_independently_per_new_instance(concept_check_parq
     # unrelated legacy-parquet warnings from the duration_days fallback).
     concept_warnings = [w for w in warnings if "Unknown concept" in w]
     assert len(concept_warnings) == 2
+
+
 # Issue #17: O(N+M) YTD synthesis — no cartesian product on restatement
 # ---------------------------------------------------------------------------
 
@@ -2327,9 +2366,7 @@ def test_legacy_parquet_balance_sheet_not_annual(tmp_path):
     """Assets in a 10-K legacy parquet must NOT be classified as annual (is_annual=False)."""
     q = _legacy_parquet(tmp_path, "us-gaap:Assets")
     row = q.data.iloc[0]
-    assert not is_annual(
-        pd.Series([row["duration_days"]]), pd.Series([row["form"]])
-    ).iloc[0]
+    assert not is_annual(pd.Series([row["duration_days"]]), pd.Series([row["form"]])).iloc[0]
 
 
 def test_legacy_parquet_revenues_still_annual(tmp_path):
@@ -2337,9 +2374,7 @@ def test_legacy_parquet_revenues_still_annual(tmp_path):
     q = _legacy_parquet(tmp_path, "us-gaap:Revenues")
     row = q.data.iloc[0]
     assert int(row["duration_days"]) == 365
-    assert is_annual(
-        pd.Series([row["duration_days"]]), pd.Series([row["form"]])
-    ).iloc[0]
+    assert is_annual(pd.Series([row["duration_days"]]), pd.Series([row["form"]])).iloc[0]
 
 
 def test_legacy_parquet_with_start_uses_real_duration(tmp_path):
@@ -2382,9 +2417,7 @@ def test_legacy_parquet_warns_once(tmp_path):
     finally:
         logger.remove(handler_id)
 
-    assert any("duration_days" in m for m in captured), (
-        f"Expected a duration_days warning, got: {captured}"
-    )
+    assert any("duration_days" in m for m in captured), f"Expected a duration_days warning, got: {captured}"
 
 
 # ---------------------------------------------------------------------------

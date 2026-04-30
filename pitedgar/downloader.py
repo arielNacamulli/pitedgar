@@ -193,9 +193,7 @@ def _verify_sidecar(zip_path: Path) -> None:
     """Compare the on-disk ZIP against its .sha256 sidecar (if present)."""
     sha256_path = zip_path.with_suffix(zip_path.suffix + ".sha256")
     if not sha256_path.exists():
-        logger.warning(
-            f"No SHA-256 sidecar found for {zip_path}. Skipping integrity check (legacy cache)."
-        )
+        logger.warning(f"No SHA-256 sidecar found for {zip_path}. Skipping integrity check (legacy cache).")
         return
     expected = sha256_path.read_text().strip()
     actual = _compute_sha256(zip_path)
@@ -222,9 +220,7 @@ def _check_zip_size(zf: zipfile.ZipFile, limit: int) -> None:
             )
         total += info.file_size
     if total > limit:
-        raise RuntimeError(
-            f"Zip decompressed size {total:,} exceeds cap {limit:,} bytes — possible zip bomb"
-        )
+        raise RuntimeError(f"Zip decompressed size {total:,} exceeds cap {limit:,} bytes — possible zip bomb")
 
 
 def download_bulk(config: PitEdgarConfig, force: bool = False) -> Path:

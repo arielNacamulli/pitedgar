@@ -140,9 +140,7 @@ def test_lowercase_tickers_normalized(mock_sleep, mock_company_cls, mock_set_ide
 @patch("pitedgar.mapping.edgar.set_identity")
 @patch("pitedgar.mapping.edgar.Company")
 @patch("pitedgar.mapping.time.sleep")
-def test_retry_recovers_from_transient_timeout(
-    mock_sleep, mock_company_cls, mock_set_identity, config
-):
+def test_retry_recovers_from_transient_timeout(mock_sleep, mock_company_cls, mock_set_identity, config):
     """edgar.Company raising TimeoutError twice, then succeeding, should resolve."""
     success_company = _make_company(320193, "Apple Inc.")
     call_count = {"n": 0}
@@ -165,9 +163,7 @@ def test_retry_recovers_from_transient_timeout(
 @patch("pitedgar.mapping.edgar.set_identity")
 @patch("pitedgar.mapping.edgar.Company")
 @patch("pitedgar.mapping.time.sleep")
-def test_three_consecutive_attribute_errors_raise(
-    mock_sleep, mock_company_cls, mock_set_identity, config
-):
+def test_three_consecutive_attribute_errors_raise(mock_sleep, mock_company_cls, mock_set_identity, config):
     """Three consecutive AttributeErrors must raise RuntimeError mentioning 'schema'."""
     mock_company_cls.side_effect = AttributeError("'NoneType' has no attribute 'cik'")
 
@@ -213,9 +209,7 @@ def test_rate_limit_adaptive(mock_company_cls, mock_set_identity, config, monkey
 @patch("pitedgar.mapping.edgar.set_identity")
 @patch("pitedgar.mapping.edgar.Company")
 @patch("pitedgar.mapping.time.sleep")
-def test_high_failure_rate_warns(
-    mock_sleep, mock_company_cls, mock_set_identity, config
-):
+def test_high_failure_rate_warns(mock_sleep, mock_company_cls, mock_set_identity, config):
     """More than 20 % of tickers failing should emit a warning via loguru."""
     from loguru import logger as loguru_logger
 
@@ -241,9 +235,9 @@ def test_high_failure_rate_warns(
     finally:
         loguru_logger.remove(handler_id)
 
-    assert any(
-        "failed" in msg.lower() or "%" in msg for msg in warning_messages
-    ), f"Expected a high-failure-rate warning, got: {warning_messages}"
+    assert any("failed" in msg.lower() or "%" in msg for msg in warning_messages), (
+        f"Expected a high-failure-rate warning, got: {warning_messages}"
+    )
 
 
 # --- CIK validation tests (#36) ---
