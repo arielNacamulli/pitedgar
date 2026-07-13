@@ -95,6 +95,38 @@ def cmd_build(identity: str, data_dir: str, force: bool, workers: int | None) ->
     click.echo(f"Built master parquet: {len(master):,} rows")
 
 
+@cli.command("dei")
+@click.option("--data-dir", default="./data", show_default=True)
+@click.option("--facts-dir", default=None, help="companyfacts dir (default: <data-dir>/companyfacts).")
+@click.option(
+    "--map-parquet",
+    default=None,
+    help="Parquet with (ticker, cik) columns for the issuer map "
+    "(default: <data-dir>/ticker_cik_map.parquet, else pit_financials.parquet).",
+)
+@click.option("--out", default=None, help="Output path (default: <data-dir>/dei_shares.parquet).")
+def cmd_dei(data_dir: str, facts_dir: str | None, map_parquet: str | None, out: str | None) -> None:
+    """Extract dei cover-page share counts with per-fact quality flags."""
+    from pitedgar.dei import extract_dei_shares, ticker_map_from_financials
+
+    base = Path(data_dir)
+    facts = Path(facts_dir) if facts_dir else base / "companyfacts"
+    _require_file(facts, hint="Run `pitedgar fetch` first to download companyfacts.")
+    map_path = Path(map_parquet) if map_parquet else base / "ticker_cik_map.parquet"
+    if not map_path.exists():
+        map_path = base / "pit_financials.parquet"
+    _require_file(map_path, hint="Need ticker_cik_map.parquet or pit_financials.parquet for tickers.")
+    tick_map = ticker_map_from_financials(map_path)
+    df = extract_dei_shares(facts, tick_map)
+    out_path = Path(out) if out else base / "dei_shares.parquet"
+    df.to_parquet(out_path, index=False)
+    by_q = df["quality"].value_counts().to_dict() if len(df) else {}
+    n_issuers = df["cticker"].nunique() if len(df) else 0
+    click.echo(f"dei_shares: {len(df):,} rows for {n_issuers} issuers")
+    click.echo(f"quality: {by_q}")
+    click.echo(f"written: {out_path}")
+
+
 @cli.command("query")
 @click.option("--ticker", required=True)
 @click.option("--concept", required=True, help='e.g. "us-gaap:Revenues"')
