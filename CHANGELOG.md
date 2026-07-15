@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **PIT SIC series** (#40): `pitedgar sic` builds `pit_sic.parquet` — for
+  each CIK, the SIC in force as of any date with filed-date semantics —
+  from the SEC Financial Statement Data Sets quarterly `sub.txt` files
+  (2009q2 onward; slim per-quarter slices cached under `fsds/`, source
+  zips discarded). All forms kept with a `form` column; invalid SICs and
+  same-day conflicts counted in `pit_sic.report.json`, never silently
+  dropped. Decision record in `pitedgar/sic.py` and issue #40.
+
 ## [0.4.0] - 2026-04-25
 
 Adversarial-review hardening pass: correctness fixes (PIT, scale, aliases),

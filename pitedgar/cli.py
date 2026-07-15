@@ -107,7 +107,7 @@ def cmd_build(identity: str, data_dir: str, force: bool, workers: int | None) ->
 @click.option("--out", default=None, help="Output path (default: <data-dir>/dei_shares.parquet).")
 def cmd_dei(data_dir: str, facts_dir: str | None, map_parquet: str | None, out: str | None) -> None:
     """Extract dei cover-page share counts with per-fact quality flags."""
-    from pitedgar.dei import extract_dei_shares, ticker_map_from_financials
+    from pitedgar.dei import extract_dei_shares, ticker_map_from_financials  # noqa: PLC0415
 
     base = Path(data_dir)
     facts = Path(facts_dir) if facts_dir else base / "companyfacts"
@@ -124,6 +124,33 @@ def cmd_dei(data_dir: str, facts_dir: str | None, map_parquet: str | None, out: 
     n_issuers = df["cticker"].nunique() if len(df) else 0
     click.echo(f"dei_shares: {len(df):,} rows for {n_issuers} issuers")
     click.echo(f"quality: {by_q}")
+    click.echo(f"written: {out_path}")
+
+
+@cli.command("sic")
+@click.option("--identity", required=True, help='SEC identity string, e.g. "Name name@email.com".')
+@click.option("--data-dir", default="./data", show_default=True)
+@click.option("--out", default=None, help="Output path (default: <data-dir>/pit_sic.parquet).")
+@click.option("--force", is_flag=True, default=False, help="Re-download all FSDS quarters.")
+def cmd_sic(identity: str, data_dir: str, out: str | None, force: bool) -> None:
+    """Build the PIT SIC series from the SEC Financial Statement Data Sets."""
+    from pitedgar.sic import build_pit_sic, download_fsds_quarters, write_outputs  # noqa: PLC0415
+
+    base = Path(data_dir)
+    click.echo("Ensuring FSDS quarterly slices (immutable once published)...")
+    paths = download_fsds_quarters(base / "fsds", identity, force=force, progress=True)
+    df, report = build_pit_sic(paths)
+    out_path = Path(out) if out else base / "pit_sic.parquet"
+    write_outputs(df, report, out_path)
+    click.echo(
+        f"pit_sic: {report['rows']:,} rows, {report['ciks']:,} CIKs, "
+        f"filed {report['filed_span'][0]} -> {report['filed_span'][1]}"
+    )
+    click.echo(
+        f"dropped invalid sic: {report['dropped_missing_or_invalid_sic']:,}; "
+        f"same-day conflicts: {report['same_day_conflicting_sic']:,}; "
+        f"CIKs with SIC changes: {report['ciks_with_sic_changes']:,}"
+    )
     click.echo(f"written: {out_path}")
 
 
